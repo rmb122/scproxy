@@ -4,6 +4,7 @@ use super::{
     access::SocketAccess,
     datagram, diagnostics,
     dns::Dns,
+    files::ResolverFiles,
     memory,
     seccomp::{self, Notification},
     sockets,
@@ -21,6 +22,7 @@ use tokio::task::{JoinHandle, JoinSet};
 pub(super) enum Reply {
     Continue,
     Value(i64),
+    Sent,
 }
 
 const RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(32);
@@ -30,6 +32,7 @@ pub(super) struct Broker {
     pub access: SocketAccess,
     pub config: crate::config::Config,
     pub dns: Dns,
+    pub resolver_files: ResolverFiles,
     pub tcp_ingress: Arc<Ingress>,
     pub peers: Mutex<HashMap<u64, Peer>>,
     pub locks: Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
@@ -47,6 +50,7 @@ impl Broker {
             access,
             config,
             dns: Dns::new()?,
+            resolver_files: ResolverFiles::new()?,
             tcp_ingress: Ingress::new()?,
             peers: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
@@ -63,6 +67,7 @@ impl Broker {
     }
     fn respond(&self, notification: &Notification, result: io::Result<Reply>) -> io::Result<()> {
         let (value, errno, passthrough) = match result {
+            Ok(Reply::Sent) => return Ok(()),
             Ok(Reply::Continue) => (0, 0, true),
             Ok(Reply::Value(value)) => (value, 0, false),
             Err(error) => {
@@ -160,6 +165,9 @@ impl Broker {
         self.valid(notification)?;
         let call = notification.data.nr as libc::c_long;
         let args = notification.data.args;
+        if seccomp::is_open(call) {
+            return self.resolver_files.open(self, notification);
+        }
         if call == libc::SYS_socket {
             let family = args[0] as i32;
             if family == libc::AF_UNIX || family == libc::AF_NETLINK {
@@ -177,29 +185,38 @@ impl Broker {
             }
             return Err(memory::error(libc::EPROTONOSUPPORT));
         }
-        let flags = if call == libc::SYS_sendto {
-            args[3]
-        } else if call == libc::SYS_sendmsg {
-            args[2]
-        } else if call == libc::SYS_sendmmsg {
-            args[3]
-        } else {
-            0
+        let flags = match call {
+            libc::SYS_sendto | libc::SYS_recvfrom | libc::SYS_sendmmsg | libc::SYS_recvmmsg => {
+                args[3]
+            }
+            libc::SYS_sendmsg | libc::SYS_recvmsg => args[2],
+            _ => 0,
         };
-        if flags as i32 & libc::MSG_FASTOPEN != 0 {
+        if matches!(
+            call,
+            libc::SYS_sendto | libc::SYS_sendmsg | libc::SYS_sendmmsg
+        ) && flags as i32 & libc::MSG_FASTOPEN != 0
+        {
             return Err(memory::error(libc::EOPNOTSUPP));
         }
         let fd = self.access.get(notification.pid, args[0] as i32)?;
         self.valid(notification)?;
         let domain = sockets::option_int(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_DOMAIN)?;
+        if domain == libc::AF_UNIX && call == libc::SYS_connect {
+            self.resolver_files.check_unix_connect(notification)?;
+        }
         if domain != libc::AF_INET {
             return Ok(Reply::Continue);
         }
         let protocol = sockets::option_int(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PROTOCOL)?;
         if protocol == libc::IPPROTO_TCP {
+            if flags as i32 & libc::MSG_OOB != 0 && self.tcp_target(fd.as_raw_fd(), true)?.is_some()
+            {
+                return Err(memory::error(libc::EOPNOTSUPP));
+            }
             if call == libc::SYS_connect {
                 self.connect_tcp(fd, notification).await
-            } else if call == libc::SYS_getpeername {
+            } else if matches!(call, libc::SYS_getpeername | libc::SYS_getsockopt) {
                 self.tcp_peer(fd, notification)
             } else {
                 Ok(Reply::Continue)

@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn one_listener_dispatches_concurrent_targets_and_rejects_other_processes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = format!("http://{}", listener.local_addr().unwrap());

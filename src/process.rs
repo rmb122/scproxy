@@ -28,7 +28,7 @@ pub fn run_command_tree(command: &[String], setup: crate::broker::ChildSetup) ->
     }
     let previous_mask = signals.thread_swap_mask(SigmaskHow::SIG_BLOCK)?;
 
-    // SAFETY: the namespace child is still single-threaded.
+    // SAFETY: the reaper is still single-threaded.
     let command_pid = match unsafe { fork() }.context("fork command")? {
         ForkResult::Child => {
             previous_mask.thread_set_mask()?;

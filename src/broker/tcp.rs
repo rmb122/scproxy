@@ -1,5 +1,5 @@
 use super::{
-    connect,
+    connect, dns,
     engine::{Broker, Reply},
     memory, relay,
     seccomp::Notification,
@@ -7,7 +7,7 @@ use super::{
 };
 use std::io;
 use std::net::SocketAddrV4;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,7 @@ impl Broker {
             return Ok(Reply::Continue);
         }
         self.peers.lock().unwrap().remove(&cookie);
-        if target.ip().is_loopback() {
+        if target.ip().is_loopback() && !dns::is_dns(target) {
             return Ok(Reply::Continue);
         }
         let permit = self
@@ -78,6 +78,7 @@ impl Broker {
         let internal = self.tcp_ingress.address;
         let proxy_target = self.dns.target(target);
         let route = self.config.proxy_for(&proxy_target).clone();
+        let dns_mapping = dns::is_dns(target).then(|| self.dns.mapping.clone());
         self.valid(notification)?;
         self.peers.lock().unwrap().insert(
             cookie,
@@ -109,6 +110,17 @@ impl Broker {
             peer.created = Instant::now();
         }
         self.relays.lock().unwrap().spawn(async move {
+            if let Some(mapping) = dns_mapping {
+                let accepted =
+                    tokio::time::timeout(Duration::from_secs(32), registration.accept()).await;
+                drop(permit);
+                if let Ok(Ok(app)) = accepted
+                    && let Err(error) = dns::serve_tcp(app, mapping).await
+                {
+                    tracing::debug!(%error, "TCP DNS closed");
+                }
+                return;
+            }
             let connection = tokio::time::timeout(Duration::from_secs(32), async {
                 let app = registration.accept().await?;
                 tracing::debug!(target = %proxy_target, %route, "outbound connection");
@@ -130,22 +142,26 @@ impl Broker {
         pending_peer.committed = true;
         result.map(|()| Reply::Value(0))
     }
-    pub fn tcp_peer(&self, fd: OwnedFd, notification: &Notification) -> io::Result<Reply> {
-        let cookie = sockets::cookie(fd.as_raw_fd())?;
+    pub fn tcp_target(&self, fd: RawFd, socket_option: bool) -> io::Result<Option<SocketAddrV4>> {
+        let cookie = sockets::cookie(fd)?;
         let peer = self.peers.lock().unwrap().get(&cookie).copied();
         let Some(peer) = peer else {
+            return Ok(None);
+        };
+        match sockets::peer_address(fd, socket_option) {
+            Ok(actual) => Ok((actual == peer.internal).then_some(peer.target)),
+            Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn tcp_peer(&self, fd: OwnedFd, notification: &Notification) -> io::Result<Reply> {
+        let socket_option = notification.data.nr as libc::c_long == libc::SYS_getsockopt;
+        let Some(target) = self.tcp_target(fd.as_raw_fd(), socket_option)? else {
             return Ok(Reply::Continue);
         };
-        if sockets::address(fd.as_raw_fd(), true)? != peer.internal {
-            return Ok(Reply::Continue);
-        }
         self.valid(notification)?;
-        memory::peer_name(
-            notification.pid,
-            notification.data.args[1],
-            notification.data.args[2],
-            peer.target,
-        )?;
+        memory::peer_name(notification, target)?;
         Ok(Reply::Value(0))
     }
 }

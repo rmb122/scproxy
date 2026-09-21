@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "time"] }
-nix = { version = "0.31.3", features = ["sched", "mount", "ioctl", "socket", "user", "net", "fs", "signal", "process"] }
+nix = { version = "0.31.3", features = ["signal", "process"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

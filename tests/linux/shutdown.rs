@@ -56,7 +56,7 @@ fn exit_command(managed: &mut ManagedChild) {
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn normal_exit_drains_payload_after_delayed_proxy_handshake() {
     let (mut managed, mut proxy) = pending_handshake();
     exit_command(&mut managed);
@@ -74,7 +74,7 @@ fn normal_exit_drains_payload_after_delayed_proxy_handshake() {
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn termination_interrupts_drain_after_command_exit() {
     let (mut managed, mut proxy) = pending_handshake();
     exit_command(&mut managed);
@@ -98,7 +98,7 @@ fn termination_interrupts_drain_after_command_exit() {
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, Python 3, and a non-loopback default route"]
+#[ignore = "requires Linux seccomp, Python 3, and a non-loopback default route"]
 fn termination_cancels_connect_on_a_non_loopback_device() {
     let routes = std::fs::read_to_string("/proc/net/route").unwrap();
     let device = routes

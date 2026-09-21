@@ -1,7 +1,8 @@
 # scproxy
 
 Run Linux programs through SOCKS5 or HTTP CONNECT using **seccomp user
-notifications**. The program and its descendants keep the host network namespace.
+notifications**. The command inherits the launcher's existing namespaces and
+user/group IDs; scproxy creates no user, mount, or network namespaces.
 No TUN device, user-space TCP/IP stack, libseccomp, or LD_PRELOAD is used.
 Statically linked programs work too.
 
@@ -11,7 +12,6 @@ cargo build --release
 ./target/release/scproxy -x http://user:pass@proxy:8080 wget https://example.com
 ./target/release/scproxy -x direct -r domain:example.com=socks5://127.0.0.1:1080 curl https://example.com
 ./target/release/scproxy -x socks5://127.0.0.1:1080 -r cidr:10.0.0.0/8=direct ssh server
-./target/release/scproxy -x direct -b ./custom.conf:/etc/example.conf my-command
 ```
 
 ## Usage
@@ -21,7 +21,6 @@ scproxy [OPTIONS] <COMMAND>...
 
 -x, --proxy <PROXY>   Required default route
 -r, --rule <RULE>     Routing rule, repeatable
--b, --bind <SRC:DST>  File bind mount, repeatable
 -v, --verbose        Debug logging; repeat for trace logging
 -h, --help           Print help
 -V, --version        Print version
@@ -54,32 +53,39 @@ Ports, conflicts, incoming peer addresses, and listener lifetimes follow native
 Linux behavior. There is **no private localhost**, port publishing, port
 remapping, or `--host-forward` option.
 
-A private mount namespace provides `resolv.conf` pointing at the virtual resolver
-`172.23.255.254` and `nsswitch.conf` containing `hosts: files dns`. Seccomp redirects
-UDP requests for that resolver to an unprivileged loopback DNS service in the
-supervisor. No host port 53 reservation or interface configuration is needed.
-A queries receive fake addresses from `198.18.0.0/15`; other question types,
-including AAAA, receive empty answers. DNS mappings are bounded and reuse the
-oldest addresses when the pool wraps, as in nsproxy-rs.
+Seccomp supplies a read-only `resolv.conf` pointing at the virtual resolver
+`172.23.255.254` and an `nsswitch.conf` whose `hosts` line is `files dns`; other NSS
+databases retain the host configuration. Opening these standard paths (including
+relative spellings and their resolved symlink targets) returns sealed memory-file
+descriptors through atomic `SECCOMP_IOCTL_NOTIF_ADDFD`. Each open has its own file
+offset. Host configuration files are never modified, and there are no bind mounts
+or `-b`/`--bind` options.
+
+Both UDP and TCP queries to any IPv4 address on port 53 are answered by the local
+fake resolver, including queries addressed to `127.0.0.53`. No host port 53
+reservation or interface configuration is needed. Replies report the originally
+requested DNS server; overlapping UDP requests to different servers remain
+separate even with the same transaction ID. A queries receive addresses from
+`198.18.0.0/15`; other types, including AAAA, receive empty answers. Mappings reuse
+the oldest addresses when the pool wraps, as in nsproxy-rs.
 
 Connecting to a fake address recovers its domain for the proxy's remote
-resolution. DNS via the configured fake resolver is answered locally; UDP to
-other destinations, including other DNS servers, is rejected. Programs using
-their own DNS-over-HTTPS/TLS send ordinary proxied TCP connections and do not
-participate in fake-IP domain routing. Pre-existing host resolver caches or
-external resolver services accessed over Unix sockets are outside fake DNS.
+resolution. The supervisor supports up to 128 distinct UDP resolver endpoints per
+run. Other UDP ports are rejected. TCP port 53 is handled before localhost bypass
+and outbound routing rules. Programs using DNS-over-HTTPS/TLS send ordinary
+proxied TCP connections and do not participate in fake-IP domain routing.
 
-## File mounts
+Connections to the nscd resolver socket and the systemd-resolved NSS socket are
+refused so standard libc lookups cannot hand resolution to those host services.
+Other application Unix sockets remain available. Applications that require a
+resolver's Unix IPC protocol without a DNS fallback are unsupported.
 
-Both `--bind` paths are relative to the launch directory unless absolute. They
-must name regular files or symbolic links; dangling symlinks are allowed.
-Symlink objects are mounted without following their targets. Relative link text
-is preserved and resolves relative to the destination's parent directory.
-
-Mounts are writable. Directories, `:ro` suffixes, duplicate targets, and overrides
-of `/etc/resolv.conf` or `/etc/nsswitch.conf` are rejected. Host mount tables are
-unchanged. Identical readable DNS mounts inherited from a launcher that already
-unlinked its temporary configuration files are reused.
+Configuration virtualization applies to `open`, `openat`, and `openat2`;
+path-based `stat` and `readlink` retain host results. Resolver configuration writes
+are rejected. `openat2` resolution constraints on these virtual files return
+`EOPNOTSUPP` instead of silently ignoring the constraints. Ordinary file opens
+continue in the kernel; reads and mappings of injected files also use native
+kernel operations.
 
 ## Implementation and connection behavior
 
@@ -96,8 +102,10 @@ lifetime. Accepted connections are dispatched by source IP and port to registere
 application sockets; unrelated connections are closed. The accept loop runs
 independently of local connects and upstream handshakes. It never
 replaces the application's descriptor or changes its `O_NONBLOCK` flag.
-Existing dup/fork/epoll references keep their identity. `getpeername` reports the
-requested destination; `getsockname` reports the actual local relay connection.
+Existing dup/fork/epoll references keep their identity. `getpeername` and
+`getsockopt(SOL_SOCKET, SO_PEERNAME)` report the requested destination, including
+the original server for connected UDP DNS. `getsockname` reports the actual
+local relay connection.
 Native local connection setup has a 32-second deadline. If the notifying call is
 cancelled or times out, the supervisor disconnects the pending socket and waits
 for its blocking worker to stop, without changing the socket's file status flags.
@@ -135,22 +143,25 @@ does not add this drain period to the command tree's termination grace period.
 
 ## Requirements and limitations
 
-- Linux 5.6 or newer, native x86_64 or aarch64. GNU and musl builds are supported.
-- Seccomp user notification, `pidfd_getfd`, socket diagnostics, and permission to
-  read/write managed process memory. These interfaces are probed before exec;
+- Linux 5.14 or newer, native x86_64 or aarch64. GNU and musl builds are supported.
+- Seccomp user notification with atomic FD injection (`ADDFD_SEND`),
+  `pidfd_getfd`, socket diagnostics, and permission to read/write managed process
+  memory. These interfaces are probed before exec;
   missing permissions cause a startup error, with no unproxied fallback.
-- A mount namespace is always used for DNS and optional file mounts. Unprivileged
-  use requires enabled user namespaces. On systems restricting user namespaces
-  through AppArmor or container policies, those policies must permit the tool.
+- No namespace creation, UID/GID mappings, or mount privileges are needed.
 - `PIDFD_THREAD` is preferred. Older kernels use a process pidfd and
   `kcmp(KCMP_FILE)`; that fallback cannot support private thread FD tables or a
   thread group whose leader has already exited. Permission errors do not select
   the fallback.
-- IPv4 TCP and internal UDP DNS only. IPv6 and raw Internet/packet sockets are
-  rejected. Unix sockets and netlink remain available.
+- IPv4 TCP and IPv4 UDP/TCP DNS only. IPv6 and raw Internet/packet sockets are
+  rejected. Unix sockets (except the resolver shortcuts above) and netlink remain
+  available.
 - `io_uring_setup`, `io_uring_enter`, and `io_uring_register` return `ENOSYS`.
   Programs must support ordinary syscall fallback. TCP Fast Open sends return
   `EOPNOTSUPP`. 32-bit compatibility ABIs and x32 are unsupported.
+- TCP urgent data is unsupported by the relays. `MSG_OOB` sends and receives on
+  relayed TCP connections, including TCP DNS, return `EOPNOTSUPP`. Native host
+  connections retain their kernel urgent-data behavior.
 - `no_new_privs` applies to the command tree; setuid privilege elevation is
   unavailable. Network connections established before launch or received from
   another process are not retroactively proxied. This is a transparent proxy
@@ -166,16 +177,17 @@ cargo test -- --ignored --test-threads=1
 ```
 
 Ignored tests exercise real kernel interfaces. They require the permissions
-above, Python 3, `unshare`, `mount`, a C compiler, and static libc development
-files. Tests use local proxy fixtures and need no public Internet connection.
-Their private `/etc` fixtures do not change host files. Coverage includes proxy
-protocols, DNS ABIs in a static executable, dup/fork/epoll, backpressure and EOF,
-file/symlink mounts, permission failures, resource exhaustion, and lifecycle.
+above, Python 3, a C compiler, and static libc development files. Tests use local
+proxy fixtures and need no public Internet connection, `unshare`, or `mount`.
+Coverage includes operation with namespace creation denied, sealed configuration
+FDs, UDP/TCP DNS and resolver-source preservation, static executables, dup/fork/
+epoll, peer-address socket options, urgent-data rejection, backpressure and EOF,
+permission failures, resource exhaustion, and lifecycle.
 
 ## Origin and license
 
 Based on the local **nsproxy-rs** implementation, reusing its proxy protocols,
-routing, fake DNS, mount handling, process reaper, and parts of its seccomp host
+routing, fake DNS, process reaper, and parts of its seccomp host
 forwarding support. nsproxy-rs was inspired by
 [nsproxy by NaLan ZeYu](https://github.com/nlzy/nsproxy).
 

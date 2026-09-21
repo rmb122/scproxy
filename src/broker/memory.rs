@@ -1,5 +1,5 @@
 //! Native 64-bit ABI memory access, with bounded copies and explicit wire layouts.
-use super::{access, sockets};
+use super::{access, seccomp::Notification, sockets};
 use std::io;
 use std::net::SocketAddrV4;
 
@@ -11,6 +11,28 @@ pub(super) fn read(tid: u32, address: u64, length: usize) -> io::Result<Vec<u8>>
     let mut bytes = vec![0; length];
     access::read_exact(tid, address, &mut bytes)?;
     Ok(bytes)
+}
+
+pub(super) fn path(tid: u32, address: u64) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = Vec::new();
+    while bytes.len() < 4096 {
+        let pointer = address
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| error(libc::EFAULT))?;
+        // Do not read past a page boundary: the next page can be unmapped even
+        // when the pathname is valid and ends just before that boundary.
+        let count = (4096 - bytes.len())
+            .min(256)
+            .min(4096 - (pointer as usize & 4095));
+        let chunk = read(tid, pointer, count)?;
+        if let Some(end) = chunk.iter().position(|&byte| byte == 0) {
+            bytes.extend_from_slice(&chunk[..end]);
+            return Ok(std::ffi::OsString::from_vec(bytes).into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Err(error(libc::ENAMETOOLONG))
 }
 pub(super) fn u32_at(tid: u32, address: u64) -> io::Result<u32> {
     let mut bytes = [0; 4];
@@ -60,15 +82,23 @@ pub(super) fn put_address(
         &address_bytes(address)[..(capacity as usize).min(16)],
     )
 }
-pub(super) fn peer_name(
-    tid: u32,
-    pointer: u64,
-    length: u64,
-    address: SocketAddrV4,
-) -> io::Result<()> {
+pub(super) fn peer_name(notification: &Notification, address: SocketAddrV4) -> io::Result<()> {
+    let tid = notification.pid;
+    let args = notification.data.args;
+    let socket_option = notification.data.nr as libc::c_long == libc::SYS_getsockopt;
+    let (pointer, length) = if socket_option {
+        (args[3], args[4])
+    } else {
+        (args[1], args[2])
+    };
     let capacity = u32_at(tid, length)?;
+    // SO_PEERNAME preserves optlen on truncation and rejects oversized buffers.
+    if socket_option && capacity > 16 {
+        return Err(error(libc::EINVAL));
+    }
     put_address(tid, pointer, capacity, address)?;
-    access::write_exact(tid, length, &16u32.to_ne_bytes())
+    let returned = if socket_option { capacity } else { 16 };
+    access::write_exact(tid, length, &returned.to_ne_bytes())
 }
 pub(super) fn nonblocking(fd: i32, flags: i32) -> io::Result<bool> {
     let status = unsafe { libc::fcntl(fd, libc::F_GETFL) };

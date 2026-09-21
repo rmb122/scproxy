@@ -53,6 +53,15 @@ struct NotificationSizes {
     data: u16,
 }
 
+#[repr(C)]
+struct AddFd {
+    id: u64,
+    flags: u32,
+    srcfd: u32,
+    newfd: u32,
+    newfd_flags: u32,
+}
+
 // Both supported architectures use the generic Linux ioctl encoding.
 const fn ioctl_request(direction: u32, number: u32, size: usize) -> libc::c_ulong {
     ((direction << 30) | ((size as u32) << 16) | ((b'!' as u32) << 8) | number) as libc::c_ulong
@@ -61,6 +70,41 @@ const fn ioctl_request(direction: u32, number: u32, size: usize) -> libc::c_ulon
 const NOTIF_RECV: libc::c_ulong = ioctl_request(3, 0, size_of::<Notification>());
 const NOTIF_SEND: libc::c_ulong = ioctl_request(3, 1, size_of::<Response>());
 const NOTIF_ID_VALID: libc::c_ulong = ioctl_request(1, 2, size_of::<u64>());
+const NOTIF_ADDFD: libc::c_ulong = ioctl_request(1, 3, size_of::<AddFd>());
+
+pub(super) fn addfd_send(listener: RawFd, id: u64, source: RawFd, cloexec: bool) -> io::Result<()> {
+    let request = AddFd {
+        id,
+        flags: 2,
+        srcfd: source as u32,
+        newfd: 0,
+        newfd_flags: if cloexec { libc::O_CLOEXEC as u32 } else { 0 },
+    };
+    if unsafe { libc::ioctl(listener, NOTIF_ADDFD as _, &request) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Before exec there are no pending notifications. ENOENT proves that the
+/// kernel recognizes atomic ADDFD_SEND without injecting an unsolicited FD.
+pub(super) fn probe_addfd(listener: RawFd, source: RawFd) -> io::Result<()> {
+    match addfd_send(listener, u64::MAX, source, true) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+        Err(error) => Err(error),
+        Ok(()) => Err(io::Error::other(
+            "unexpected notification during ADDFD probe",
+        )),
+    }
+}
+
+pub(super) fn is_open(call: libc::c_long) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    if call == libc::SYS_open {
+        return true;
+    }
+    matches!(call, libc::SYS_openat | libc::SYS_openat2)
+}
 
 fn statement(code: u16, k: u32) -> libc::sock_filter {
     libc::sock_filter {
@@ -96,7 +140,21 @@ fn filter() -> Vec<libc::sock_filter> {
         filter.push(jump(JEQ, syscall as u32, 0, 1));
         filter.push(statement(RET, SECCOMP_RET_ERRNO | libc::ENOSYS as u32));
     }
+    // Only SO_PEERNAME needs virtualization; other socket options stay native.
+    filter.extend([
+        jump(JEQ, libc::SYS_getsockopt as u32, 0, 6),
+        statement(LOAD, (offset_of!(Data, args) + 8) as u32),
+        jump(JEQ, libc::SOL_SOCKET as u32, 0, 3),
+        statement(LOAD, (offset_of!(Data, args) + 16) as u32),
+        jump(JEQ, libc::SO_PEERNAME as u32, 0, 1),
+        statement(RET, SECCOMP_RET_USER_NOTIF),
+        statement(RET, SECCOMP_RET_ALLOW),
+    ]);
     for syscall in [
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_open,
+        libc::SYS_openat,
+        libc::SYS_openat2,
         libc::SYS_socket,
         libc::SYS_connect,
         libc::SYS_getpeername,
@@ -216,6 +274,10 @@ mod tests {
     use super::*;
 
     fn evaluate(arch: u32, syscall: i32) -> u32 {
+        evaluate_with_args(arch, syscall, [0; 6])
+    }
+
+    fn evaluate_with_args(arch: u32, syscall: i32, args: [u64; 6]) -> u32 {
         let instructions = filter();
         let mut accumulator = 0;
         let mut pc = 0;
@@ -225,8 +287,11 @@ mod tests {
                 code if code == libc::BPF_LD | libc::BPF_W | libc::BPF_ABS => {
                     accumulator = if instruction.k == offset_of!(Data, arch) as u32 {
                         arch
-                    } else {
+                    } else if instruction.k == offset_of!(Data, nr) as u32 {
                         syscall as u32
+                    } else {
+                        let offset = instruction.k as usize - offset_of!(Data, args);
+                        (args[offset / 8] >> ((offset % 8) * 8)) as u32
                     };
                 }
                 code if code == libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K => {
@@ -251,8 +316,12 @@ mod tests {
     }
 
     #[test]
-    fn filter_intercepts_network_calls() {
+    fn filter_intercepts_network_and_configuration_opens() {
         for syscall in [
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_open,
+            libc::SYS_openat,
+            libc::SYS_openat2,
             libc::SYS_socket,
             libc::SYS_connect,
             libc::SYS_getpeername,
@@ -276,6 +345,25 @@ mod tests {
             libc::SYS_write,
         ] {
             assert_eq!(evaluate(NATIVE_ARCH, syscall as i32), SECCOMP_RET_ALLOW);
+        }
+    }
+
+    #[test]
+    fn only_peer_name_socket_option_is_intercepted() {
+        for (level, option, expected) in [
+            (libc::SOL_SOCKET, libc::SO_PEERNAME, SECCOMP_RET_USER_NOTIF),
+            (libc::SOL_SOCKET, libc::SO_ERROR, SECCOMP_RET_ALLOW),
+            (libc::SOL_SOCKET, libc::SO_TYPE, SECCOMP_RET_ALLOW),
+            (libc::IPPROTO_TCP, libc::SO_PEERNAME, SECCOMP_RET_ALLOW),
+        ] {
+            assert_eq!(
+                evaluate_with_args(
+                    NATIVE_ARCH,
+                    libc::SYS_getsockopt as i32,
+                    [0, level as u64, option as u64, 0, 0, 0],
+                ),
+                expected,
+            );
         }
     }
 

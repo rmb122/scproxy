@@ -1,6 +1,6 @@
 //! DNS datagrams use the application's real UDP socket and kernel readiness.
 use super::{
-    access, dns,
+    access,
     engine::{Broker, Reply},
     memory,
     message::Message,
@@ -27,19 +27,18 @@ pub(super) async fn dispatch(
             return Ok(Reply::Continue);
         }
         let target = memory::ipv4(notification.pid, args[1], args[2])?;
-        if target != dns::virtual_address() {
-            return Err(memory::error(libc::ENETUNREACH));
-        }
+        let local = broker.dns.server_for(target)?;
         broker.valid(notification)?;
-        sockets::connect(fd.as_raw_fd(), broker.dns.address)?;
+        sockets::connect(fd.as_raw_fd(), local)?;
         return Ok(Reply::Value(0));
     }
-    if call == libc::SYS_getpeername {
-        if sockets::address(fd.as_raw_fd(), true)? != broker.dns.address {
+    if matches!(call, libc::SYS_getpeername | libc::SYS_getsockopt) {
+        let actual = sockets::peer_address(fd.as_raw_fd(), call == libc::SYS_getsockopt)?;
+        let Some(original) = broker.dns.original_server(actual) else {
             return Ok(Reply::Continue);
-        }
+        };
         broker.valid(notification)?;
-        memory::peer_name(notification.pid, args[1], args[2], dns::virtual_address())?;
+        memory::peer_name(notification, original)?;
         return Ok(Reply::Value(0));
     }
     let receive = [libc::SYS_recvfrom, libc::SYS_recvmsg, libc::SYS_recvmmsg].contains(&call);
@@ -200,25 +199,24 @@ async fn transfer(
     } else {
         memory::read(notification.pid, message.control, message.control_length)?
     };
-    if !receive {
-        if message.name != 0 {
-            let target = memory::ipv4(notification.pid, message.name, message.name_length as u64)?;
-            if target != dns::virtual_address() {
-                return Err(memory::error(libc::ENETUNREACH));
-            }
-        } else {
-            match sockets::address(fd.as_raw_fd(), true) {
-                Ok(address) if address == broker.dns.address => {}
-                Ok(_) => return Err(memory::error(libc::ENETUNREACH)),
-                Err(_) => return Err(memory::error(libc::EDESTADDRREQ)),
-            }
+    let destination = if receive {
+        // recvmsg overwrites this initialized sockaddr with the packet source.
+        std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0)
+    } else if message.name != 0 {
+        let target = memory::ipv4(notification.pid, message.name, message.name_length as u64)?;
+        broker.dns.server_for(target)?
+    } else {
+        match sockets::address(fd.as_raw_fd(), true) {
+            Ok(address) if broker.dns.original_server(address).is_some() => address,
+            Ok(_) => return Err(memory::error(libc::ENETUNREACH)),
+            Err(_) => return Err(memory::error(libc::EDESTADDRREQ)),
         }
-    }
+    };
     loop {
         broker.valid(notification)?;
         match transfer_now(
             fd.as_raw_fd(),
-            broker.dns.address,
+            destination,
             &mut payload,
             &mut control,
             flags,
@@ -229,11 +227,7 @@ async fn transfer(
                     broker.valid(notification)?;
                     message
                         .write_payload(notification.pid, &payload[..length.min(payload.len())])?;
-                    let source = if source == broker.dns.address {
-                        dns::virtual_address()
-                    } else {
-                        source
-                    };
+                    let source = broker.dns.original_server(source).unwrap_or(source);
                     message.finish(
                         notification.pid,
                         source,

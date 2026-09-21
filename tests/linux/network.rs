@@ -4,7 +4,7 @@ use std::net::{TcpListener, UdpSocket};
 use std::time::Duration;
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn localhost_and_listeners_use_the_host_network() {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = server.local_addr().unwrap();
@@ -53,7 +53,54 @@ except OSError as e: assert e.errno==errno.EADDRINUSE
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
+fn native_peer_options_and_oob_remain_available() {
+    let script = format!(
+        "{SOCKET_API}\n{}",
+        r#"
+import select
+for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+    with socket.socket(socket.AF_INET, kind) as unconnected:
+        try:
+            peer_name(unconnected)
+            raise AssertionError('unconnected socket has a peer')
+        except OSError as error:
+            assert error.errno == errno.ENOTCONN, error
+server = socket.socket()
+server.bind(('127.0.0.1', 0)); server.listen()
+client = socket.create_connection(server.getsockname(), timeout=3)
+accepted, _ = server.accept()
+accepted.settimeout(3)
+for sender, receiver in ((client, accepted), (accepted, client)):
+    assert peer_name(sender) == sender.getpeername()
+    assert sender.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == socket.SOCK_STREAM
+    sender.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    assert sender.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1
+    sender.sendall(b'A')
+    assert sender.send(b'!', socket.MSG_OOB) == 1
+    sender.sendall(b'B')
+    assert select.select([], [], [receiver], 3)[2]
+    assert receiver.recv(1, socket.MSG_OOB | socket.MSG_DONTWAIT) == b'!'
+    data = b''
+    while len(data) < 2:
+        part = receiver.recv(2 - len(data)); assert part; data += part
+    assert data == b'AB'
+accepted.close(); client.close(); server.close()
+"#
+    );
+    let output = scproxy("http://127.0.0.1:1")
+        .args(["python3", "-c", &script])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn unsupported_network_paths_cannot_send_packets() {
     let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
     udp.set_read_timeout(Some(Duration::from_millis(100)))
@@ -69,7 +116,7 @@ for family,kind,protocol,error in [(socket.AF_INET6,socket.SOCK_STREAM,0,errno.E
     try: socket.socket(family,kind,protocol); raise AssertionError('unsupported socket allowed')
     except OSError as e: assert e.errno==error,e
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-for destination in [('127.0.0.1',int(os.environ['UDP_PORT'])),('8.8.8.8',53)]:
+for destination in [('127.0.0.1',int(os.environ['UDP_PORT'])),('8.8.8.8',123)]:
     try: s.sendto(b'no leak',destination); raise AssertionError('UDP allowed')
     except OSError as e: assert e.errno==errno.ENETUNREACH,e
 s=socket.socket()
@@ -86,7 +133,7 @@ except OSError as e: assert e.errno==errno.EOPNOTSUPP,e
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, a C compiler, and static libc"]
+#[ignore = "requires Linux seccomp, a C compiler, and static libc"]
 fn static_binary_dns_abi_and_readiness() {
     let temp = TestDir::new("dns");
     let binary = temp.0.join("dns");
@@ -120,7 +167,7 @@ fn static_binary_dns_abi_and_readiness() {
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn glibc_dns_handles_ipv4_and_empty_ipv6_without_host_resolution() {
     let output=scproxy("http://127.0.0.1:1").args(["python3","-c",r#"
 import socket, threading

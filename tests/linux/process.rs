@@ -4,7 +4,7 @@ use nix::unistd::Pid;
 use std::time::{Duration, Instant};
 
 #[test]
-#[ignore = "requires Linux user/mount namespaces and seccomp, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn sigterm_terminates_and_reaps_the_entire_managed_tree() {
     let mut managed = ManagedChild::spawn(
         r#"
@@ -61,7 +61,7 @@ while True:
 }
 
 #[test]
-#[ignore = "requires Linux user/mount namespaces and seccomp, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn sigint_after_sigterm_reaches_the_command_as_sigint() {
     let mut managed = signal_recording_command(true);
     let parent = Pid::from_raw(managed.child.id() as i32);
@@ -74,7 +74,7 @@ fn sigint_after_sigterm_reaches_the_command_as_sigint() {
 }
 
 #[test]
-#[ignore = "requires Linux user/mount namespaces and seccomp, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn later_termination_signals_preserve_the_first_grace_deadline() {
     let mut managed = signal_recording_command(false);
     let parent = Pid::from_raw(managed.child.id() as i32);
@@ -93,7 +93,7 @@ fn later_termination_signals_preserve_the_first_grace_deadline() {
 }
 
 #[test]
-#[ignore = "requires Linux user/mount namespaces and seccomp, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn normal_command_exit_still_waits_for_descendants() {
     let output = scproxy("direct").args(["python3", "-c", r#"
 import subprocess, sys
@@ -110,12 +110,13 @@ sys.exit(7)
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn killed_broker_does_not_leave_a_command_tree_running() {
     let mut managed = ManagedChild::spawn(
         r#"
-import os,signal,subprocess,time
-child=subprocess.Popen(['sleep','60'])
+import os,signal,subprocess,sys,time
+child=subprocess.Popen([sys.executable,'-u','-c','import time; print("ready", flush=True); time.sleep(60)'],stdout=subprocess.PIPE)
+assert child.stdout.readline()==b'ready\n'
 signal.signal(signal.SIGTERM,signal.SIG_IGN)
 print(os.getppid(),os.getpid(),child.pid,flush=True)
 time.sleep(60)

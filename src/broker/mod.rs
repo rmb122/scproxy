@@ -5,6 +5,7 @@ mod datagram;
 mod diagnostics;
 mod dns;
 mod engine;
+mod files;
 mod memory;
 mod message;
 mod receiver;
@@ -58,6 +59,7 @@ impl ChildSetup {
         if ready != [1] || memory != [0x6e] {
             bail!("seccomp startup handshake failed");
         }
+        files::verify_bootstrap().context("verify seccomp DNS configuration injection")?;
         Ok(())
     }
 
@@ -108,6 +110,8 @@ impl Service {
         if !sockets::is_tcp_v4(probe.as_raw_fd())? {
             bail!("socket access probe failed");
         }
+        seccomp::probe_addfd(listener.as_raw_fd(), probe.as_raw_fd())
+            .context("probe seccomp ADDFD_SEND (requires Linux 5.14 or newer)")?;
         let mut memory = [0];
         access::read_exact(tid, address, &mut memory).context("read command memory")?;
         access::write_exact(tid, address, &memory).context("write command memory")?;

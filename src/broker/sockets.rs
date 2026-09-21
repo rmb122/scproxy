@@ -63,6 +63,16 @@ pub(super) fn option<T: Copy>(fd: RawFd, level: i32, name: i32) -> io::Result<T>
 pub(super) fn option_int(fd: RawFd, level: i32, name: i32) -> io::Result<i32> {
     option(fd, level, name)
 }
+
+pub(super) fn peer_address(fd: RawFd, socket_option: bool) -> io::Result<SocketAddrV4> {
+    if socket_option {
+        // SO_PEERNAME also accepts a peer while TCP is still connecting.
+        option(fd, libc::SOL_SOCKET, libc::SO_PEERNAME).map(decode)
+    } else {
+        address(fd, true)
+    }
+}
+
 pub(super) fn cookie(fd: RawFd) -> io::Result<u64> {
     option(fd, libc::SOL_SOCKET, libc::SO_COOKIE)
 }

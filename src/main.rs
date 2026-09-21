@@ -1,16 +1,14 @@
 mod broker;
 mod config;
 mod fake_dns;
-mod mounts;
 mod process;
 mod proxy;
 mod rule;
 
 use std::fs::File;
-use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{WaitStatus, waitpid};
@@ -31,9 +29,6 @@ struct Cli {
     /// Routing rule: ip:<ip>=<route>, cidr:<net>/<prefix>=<route>, domain:<host>=<route>, domain-regex:<regex>=<route>
     #[arg(short = 'r', long = "rule", value_name = "RULE")]
     rules: Vec<String>,
-    /// Bind-mount a file or symlink in the command's private mount namespace
-    #[arg(short = 'b', long = "bind", value_name = "SRC:DST")]
-    binds: Vec<String>,
     /// Enable debug output; repeat for trace output
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbose: u8,
@@ -67,8 +62,6 @@ fn run() -> Result<i32> {
     let config = Config {
         default_proxy: ProxyConfig::parse(&cli.proxy).context("parse --proxy")?,
         rules: RuleMatcher::from_specs(&cli.rules).context("parse --rule")?,
-        bind_mounts: mounts::parse_bind_mounts(&cli.binds, &std::env::current_dir()?)
-            .context("parse --bind")?,
         command: cli.command,
     };
     let (parent_control, child_control) = UnixStream::pair()?;
@@ -78,13 +71,7 @@ fn run() -> Result<i32> {
         ForkResult::Child => {
             drop(parent_control);
             drop(parent_life);
-            let mut control = File::from(std::os::fd::OwnedFd::from(child_control));
-            let needs_maps = mounts::create_namespace()?;
-            control.write_all(&[u8::from(needs_maps)])?;
-            if needs_maps {
-                expect_ready(&mut control)?;
-            }
-            mounts::setup_mount_namespace(&config.bind_mounts)?;
+            let control = File::from(std::os::fd::OwnedFd::from(child_control));
             process::run_command_tree(
                 &config.command,
                 broker::ChildSetup::new(control, child_life),
@@ -108,17 +95,6 @@ fn run() -> Result<i32> {
     }
 }
 
-fn expect_ready(control: &mut File) -> Result<()> {
-    let mut byte = [0];
-    control
-        .read_exact(&mut byte)
-        .context("setup channel closed before acknowledgement")?;
-    if byte != [1] {
-        bail!("invalid setup acknowledgement");
-    }
-    Ok(())
-}
-
 fn wait_child(child: Pid) -> Result<i32> {
     loop {
         match waitpid(child, None) {
@@ -131,22 +107,6 @@ fn wait_child(child: Pid) -> Result<i32> {
 }
 
 fn supervise(mut control: File, _life: UnixStream, child: Pid, config: Config) -> Result<i32> {
-    let mut maps = [0];
-    control
-        .read_exact(&mut maps)
-        .context("receive namespace setup")?;
-    match maps[0] {
-        0 => {}
-        1 => {
-            mounts::write_id_maps(
-                child.as_raw() as u32,
-                nix::unistd::getuid().as_raw(),
-                nix::unistd::getgid().as_raw(),
-            )?;
-            control.write_all(&[1])?;
-        }
-        _ => bail!("invalid namespace setup message"),
-    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -215,24 +175,24 @@ fn supervise(mut control: File, _life: UnixStream, child: Pid, config: Config) -
 mod tests {
     use super::*;
     #[test]
-    fn options_stop_at_command_and_removed_flag_is_rejected() {
+    fn options_stop_at_command_and_removed_flags_are_rejected() {
         let cli = Cli::try_parse_from([
             "scproxy",
             "-x",
             "direct",
+            "command",
             "-b",
             "a:b",
-            "-b",
-            "c:d",
-            "command",
             "--host-forward",
             "-v",
         ])
         .unwrap();
-        assert_eq!(cli.binds, ["a:b", "c:d"]);
-        assert_eq!(cli.command, ["command", "--host-forward", "-v"]);
-        assert!(
-            Cli::try_parse_from(["scproxy", "-x", "direct", "--host-forward", "true"]).is_err()
+        assert_eq!(
+            cli.command,
+            ["command", "-b", "a:b", "--host-forward", "-v"]
         );
+        for flag in ["-b", "--bind", "--host-forward"] {
+            assert!(Cli::try_parse_from(["scproxy", "-x", "direct", flag, "true"]).is_err());
+        }
     }
 }

@@ -6,15 +6,10 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
+pub(super) const SOCKET_API: &str = include_str!("../fixtures/socket_api.py");
+
 pub(super) fn scproxy(proxy: &str) -> Command {
-    // Use linked DNS mount targets even when the test runner itself is inside
-    // scproxy. This fixture changes only its own private mount namespace.
-    let mut command = Command::new("unshare");
-    command.args([
-        "-Urm", "sh", "-c",
-        "mount -t tmpfs tmpfs /etc && touch /etc/resolv.conf /etc/nsswitch.conf && printf '127.0.0.1 localhost\\n' > /etc/hosts && exec \"$@\"",
-        "scproxy-test", env!("CARGO_BIN_EXE_scproxy"),
-    ]);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_scproxy"));
     command.args(["-x", proxy]);
     command
 }

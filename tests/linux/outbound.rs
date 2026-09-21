@@ -3,26 +3,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 
 #[test]
-#[ignore = "requires Linux user/mount namespaces and seccomp"]
-fn internal_dns_mounts_are_readable_by_all_users() {
-    let output = scproxy("direct")
-        .args(["sh", "-c", "stat -c '%a' /etc/resolv.conf /etc/nsswitch.conf; cat /etc/resolv.conf /etc/nsswitch.conf"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "644\n644\nnameserver 172.23.255.254\nhosts: files dns\n"
-    );
-}
-
-#[test]
-#[ignore = "requires Linux user/mount namespaces, seccomp, and Python 3"]
-fn http_greeting_and_subsequent_responses_reach_the_namespace() {
+#[ignore = "requires Linux seccomp and Python 3"]
+fn http_greeting_and_subsequent_responses_reach_the_command() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = format!("http://localhost:{}", listener.local_addr().unwrap().port());
     let server = std::thread::spawn(move || {
@@ -85,7 +67,7 @@ print('Outbound median round trip: %.3f ms' % statistics.median(elapsed))
 }
 
 #[test]
-#[ignore = "requires Linux user/mount namespaces, seccomp, pidfd_getfd, and Python 3"]
+#[ignore = "requires Linux seccomp, pidfd_getfd, and Python 3"]
 fn fake_dns_rules_and_explicit_outbound_bind() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = listener.local_addr().unwrap();
@@ -162,7 +144,83 @@ fn tunnel(listener: TcpListener, expected: &str) -> std::net::TcpStream {
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
+fn peer_name_socket_option_preserves_target_and_buffer_semantics() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut stream = tunnel(listener, "203.0.113.25:443");
+        stream.write_all(b"R").unwrap();
+        let mut ack = [0];
+        stream.read_exact(&mut ack).unwrap();
+        assert_eq!(&ack, b"!");
+    });
+    let script = format!(
+        "{SOCKET_API}\n{}",
+        r#"
+import os
+target = ('203.0.113.25', 443)
+s = socket.create_connection(target, timeout=3)
+assert s.recv(1) == b'R'
+check_peer_option(s, target)
+with socket.socket(fileno=os.dup(s.fileno())) as duplicate:
+    assert peer_name(duplicate) == target
+s.sendall(b'!')
+"#
+    );
+    let output = scproxy(&proxy)
+        .args(["python3", "-c", &script])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires Linux seccomp and Python 3"]
+fn relayed_oob_is_rejected_without_affecting_normal_data() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut stream = tunnel(listener, "203.0.113.25:443");
+        stream.write_all(b"R").unwrap();
+        let mut bytes = [0; 2];
+        stream.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"AB");
+        stream.write_all(b"OK").unwrap();
+        stream.read_exact(&mut bytes[..1]).unwrap();
+        assert_eq!(bytes[0], b'!');
+    });
+    let script = format!(
+        "{SOCKET_API}\n{}",
+        r#"
+s = socket.create_connection(('203.0.113.25', 443), timeout=3)
+assert s.recv(1) == b'R'
+s.sendall(b'A')
+check_oob_rejected(s)
+s.sendall(b'B')
+assert s.recv(2, socket.MSG_WAITALL) == b'OK'
+s.sendall(b'!')
+"#
+    );
+    let output = scproxy(&proxy)
+        .args(["python3", "-c", &script])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn nonblocking_connect_preserves_dup_fork_epoll_and_peer() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy = format!("http://{}", listener.local_addr().unwrap());
@@ -212,7 +270,7 @@ s.close(); duplicate.close(); assert os.waitpid(pid,0)[1]==0
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn bidirectional_backpressure_and_both_eof_directions_preserve_payloads() {
     for mode in ["echo", "app-eof", "upstream-eof"] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -287,7 +345,7 @@ else:
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn direct_domain_route_uses_the_supervisors_resolver() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -316,7 +374,7 @@ assert data==b'DIRECT'; s.sendall(b'!')
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn socks5_authenticated_domain_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let route = format!("socks5://alice:secret@{}", listener.local_addr().unwrap());
@@ -376,7 +434,7 @@ assert data==b'SOCKS';s.sendall(b'!')
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, prlimit permissions, and Python 3"]
+#[ignore = "requires Linux seccomp, prlimit permissions, and Python 3"]
 fn descriptor_exhaustion_fails_one_request_and_recovers() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let route = format!("http://{}", listener.local_addr().unwrap());
@@ -449,7 +507,7 @@ assert data==b'OK';s.sendall(b'!')
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, user/mount namespaces, and Python 3"]
+#[ignore = "requires Linux seccomp and Python 3"]
 fn rejected_proxy_handshake_closes_the_local_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let route = format!("http://{}", listener.local_addr().unwrap());
