@@ -1,0 +1,42 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            suffix: linux-amd64-glibc
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+            suffix: linux-amd64-musl
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            suffix: linux-arm64-glibc
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            suffix: linux-arm64-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Prepare artifact
+        env:
+          TARGET: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          cp "target/$TARGET/release/scproxy" "scproxy-$SUFFIX"
+          sha256sum "scproxy-$SUFFIX" > "scproxy-$SUFFIX.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            scproxy-${{ matrix.suffix }}
+            scproxy-${{ matrix.suffix }}.sha256

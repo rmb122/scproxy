@@ -1,0 +1,28 @@
+[package]
+name = "scproxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "scproxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "signal", "time"] }
+nix = { version = "0.31.3", features = ["sched", "mount", "ioctl", "socket", "user", "net", "fs", "signal", "process"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+async-trait = "0.1"
+libc = "0.2"
+regex = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+lto = true
+strip = true
