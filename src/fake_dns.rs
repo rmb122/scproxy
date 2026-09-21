@@ -224,302 +224,87 @@ fn encode_name(buf: &mut Vec<u8>, domain: &str) {
 mod tests {
     use super::*;
 
-    // ── FakeDns ───────────────────────────────────────────────────────────
-
     #[test]
-    fn resolve_and_lookup() {
+    fn mappings_are_stable_distinct_and_reversible() {
         let mut dns = FakeDns::new();
-        let ip = dns.resolve("example.com");
-        assert_eq!(
-            dns.lookup(ip),
-            Some("example.com"),
-            "reverse lookup should return the domain that was resolved"
-        );
-    }
-
-    #[test]
-    fn same_domain_same_ip() {
-        let mut dns = FakeDns::new();
-        let ip1 = dns.resolve("example.com");
-        let ip2 = dns.resolve("example.com");
-        assert_eq!(
-            ip1, ip2,
-            "resolving the same domain twice must return the same IP"
-        );
-    }
-
-    #[test]
-    fn different_domains_get_different_ips() {
-        let mut dns = FakeDns::new();
-        let ip1 = dns.resolve("foo.example.com");
-        let ip2 = dns.resolve("bar.example.com");
-        assert_ne!(ip1, ip2, "distinct domains must receive distinct fake IPs");
-    }
-
-    #[test]
-    fn unknown_ip_returns_none() {
-        let dns = FakeDns::new();
+        let first = dns.resolve("first.test");
+        let second = dns.resolve("second.test");
+        assert_eq!(dns.resolve("first.test"), first);
+        assert_ne!(first, second);
+        assert_eq!(dns.lookup(first), Some("first.test"));
+        assert_eq!(dns.lookup(second), Some("second.test"));
         assert_eq!(dns.lookup(Ipv4Addr::new(1, 2, 3, 4)), None);
-    }
-
-    #[test]
-    fn is_fake_ip_inside_pool() {
-        let dns = FakeDns::new();
-        // First usable address
-        assert!(dns.is_fake_ip(Ipv4Addr::new(198, 18, 0, 1)));
-        // Last usable address
-        assert!(dns.is_fake_ip(Ipv4Addr::new(198, 19, 255, 254)));
-        // Somewhere in the middle
-        assert!(dns.is_fake_ip(Ipv4Addr::new(198, 18, 128, 1)));
-        assert!(dns.is_fake_ip(Ipv4Addr::new(198, 19, 0, 1)));
-    }
-
-    #[test]
-    fn is_fake_ip_outside_pool() {
-        let dns = FakeDns::new();
-        // Network address (excluded)
-        assert!(!dns.is_fake_ip(Ipv4Addr::new(198, 18, 0, 0)));
-        // Broadcast address (excluded)
-        assert!(!dns.is_fake_ip(Ipv4Addr::new(198, 19, 255, 255)));
-        // Before the pool
-        assert!(!dns.is_fake_ip(Ipv4Addr::new(198, 17, 255, 255)));
-        // After the pool
-        assert!(!dns.is_fake_ip(Ipv4Addr::new(198, 20, 0, 1)));
-        // Completely unrelated
-        assert!(!dns.is_fake_ip(Ipv4Addr::new(1, 1, 1, 1)));
-        assert!(!dns.is_fake_ip(Ipv4Addr::new(192, 168, 1, 1)));
-    }
-
-    #[test]
-    fn first_allocation_starts_at_pool_start() {
-        let mut dns = FakeDns::new();
-        let ip = dns.resolve("first.test");
-        assert_eq!(
-            u32::from(ip),
-            POOL_START,
-            "first allocation must be POOL_START"
-        );
-    }
-
-    #[test]
-    fn wrap_around_overwrites_oldest_mapping() {
-        let mut dns = FakeDns::new();
-
-        // Fill the entire pool.
-        for i in 0..POOL_SIZE {
-            dns.resolve(&format!("d{}.test", i));
+        for (address, expected) in [
+            (POOL_START - 1, false),
+            (POOL_START, true),
+            (POOL_END, true),
+            (POOL_END + 1, false),
+        ] {
+            assert_eq!(dns.is_fake_ip(Ipv4Addr::from(address)), expected);
         }
-
-        // The very next allocation wraps back to POOL_START and evicts "d0.test".
-        let wrapped_ip = dns.resolve("new.test");
-        assert_eq!(
-            u32::from(wrapped_ip),
-            POOL_START,
-            "wrap-around must reuse POOL_START"
-        );
-        assert_eq!(
-            dns.lookup(Ipv4Addr::from(POOL_START)),
-            Some("new.test"),
-            "POOL_START must now map to the new domain"
-        );
-        // The evicted domain no longer has a mapping.
-        assert!(
-            !dns.domain_to_ip.contains_key("d0.test"),
-            "evicted domain must be removed from forward map"
-        );
-    }
-
-    // ── DNS packet helpers ────────────────────────────────────────────────
-
-    /// Build a minimal query datagram for `domain` with the given qtype.
-    fn make_query(id: u16, domain: &str, qtype: u16) -> Vec<u8> {
-        let mut pkt = Vec::new();
-        pkt.extend_from_slice(&id.to_be_bytes());
-        pkt.extend_from_slice(&0x0100u16.to_be_bytes()); // RD=1
-        pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
-        pkt.extend_from_slice(&0u16.to_be_bytes());
-        pkt.extend_from_slice(&0u16.to_be_bytes());
-        pkt.extend_from_slice(&0u16.to_be_bytes());
-        encode_name(&mut pkt, domain);
-        pkt.extend_from_slice(&qtype.to_be_bytes());
-        pkt.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
-        pkt
     }
 
     #[test]
-    fn parse_query_a_record() {
-        let pkt = make_query(0x1234, "example.com", 1 /* A */);
-        let result = parse_query(&pkt);
-        assert!(result.is_some(), "valid A query must parse successfully");
-        let (id, domain, qtype) = result.unwrap();
-        assert_eq!(id, 0x1234);
-        assert_eq!(domain, "example.com");
-        assert_eq!(qtype, 1);
+    fn pool_wraparound_evicts_both_mapping_directions() {
+        let mut dns = FakeDns::new();
+        let first = dns.resolve("first.test");
+        for i in 1..POOL_SIZE {
+            dns.resolve(&format!("{i}.test"));
+        }
+        assert_eq!(dns.resolve("new.test"), first);
+        assert_eq!(dns.lookup(first), Some("new.test"));
+        assert_ne!(dns.resolve("first.test"), first);
+    }
+
+    fn query(qtype: u16) -> Vec<u8> {
+        let mut packet =
+            b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00".to_vec();
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet
     }
 
     #[test]
-    fn parse_query_aaaa_record() {
-        let pkt = make_query(0xBEEF, "ipv6.example.com", 28 /* AAAA */);
-        let (id, domain, qtype) = parse_query(&pkt).expect("AAAA query should parse");
-        assert_eq!(id, 0xBEEF);
-        assert_eq!(domain, "ipv6.example.com");
-        assert_eq!(qtype, 28);
+    fn a_and_aaaa_queries_preserve_the_question_and_answer_policy() {
+        let ip = Ipv4Addr::new(198, 18, 0, 42);
+        for qtype in [1, 28] {
+            let request = query(qtype);
+            let (id, domain, kind) = parse_query(&request).unwrap();
+            assert_eq!((id, domain.as_str(), kind), (0x1234, "example.com", qtype));
+            let response = if kind == 1 {
+                build_a_response(id, &domain, ip)
+            } else {
+                build_empty_response(id, &domain, kind)
+            };
+            assert_eq!(&response[..6], b"\x12\x34\x81\x80\x00\x01");
+            assert_eq!(&response[6..8], &u16::from(kind == 1).to_be_bytes());
+            assert_eq!(&response[12..request.len()], &request[12..]);
+            if kind == 1 {
+                assert_eq!(&response[response.len() - 4..], &ip.octets());
+            } else {
+                assert_eq!(response.len(), request.len());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_queries_and_response_packets_are_rejected() {
+        let request = query(1);
+        assert!(parse_query(&request[..11]).is_none());
+        assert!(parse_query(&request[..request.len() - 1]).is_none());
+        let mut response = request;
+        response[2] |= 0x80;
+        assert!(parse_query(&response).is_none());
     }
 
     #[test]
     fn root_ns_query_preserves_question_wire_format() {
-        // Construct the wire query independently of encode_name.
         let query = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1];
         let (id, domain, qtype) = parse_query(&query).unwrap();
         assert_eq!(domain, "");
         assert_eq!(qtype, 2);
-
         let response = build_empty_response(id, &domain, qtype);
         assert_eq!(&response[12..], &query[12..]);
-        assert_eq!(response.len(), 17);
-    }
-
-    #[test]
-    fn parse_query_rejects_response() {
-        // Set QR bit → this is a response, not a query.
-        let mut pkt = make_query(0x0001, "example.com", 1);
-        pkt[2] = 0x80; // set QR bit in flags high byte
-        assert!(
-            parse_query(&pkt).is_none(),
-            "parse_query must reject DNS response packets"
-        );
-    }
-
-    #[test]
-    fn parse_query_rejects_too_short() {
-        assert!(parse_query(&[0u8; 11]).is_none());
-        assert!(parse_query(&[]).is_none());
-    }
-
-    #[test]
-    fn build_a_response_header_fields() {
-        let id = 0xABCD;
-        let ip = Ipv4Addr::new(198, 18, 0, 42);
-        let resp = build_a_response(id, "test.example.com", ip);
-
-        assert_eq!(
-            u16::from_be_bytes([resp[0], resp[1]]),
-            id,
-            "ID must be echoed"
-        );
-        assert_eq!(
-            u16::from_be_bytes([resp[2], resp[3]]),
-            0x8180,
-            "flags must be 0x8180"
-        );
-        assert_eq!(
-            u16::from_be_bytes([resp[4], resp[5]]),
-            1,
-            "QDCOUNT must be 1"
-        );
-        assert_eq!(
-            u16::from_be_bytes([resp[6], resp[7]]),
-            1,
-            "ANCOUNT must be 1"
-        );
-        assert_eq!(
-            u16::from_be_bytes([resp[8], resp[9]]),
-            0,
-            "NSCOUNT must be 0"
-        );
-        assert_eq!(
-            u16::from_be_bytes([resp[10], resp[11]]),
-            0,
-            "ARCOUNT must be 0"
-        );
-    }
-
-    #[test]
-    fn build_a_response_ip_in_rdata() {
-        let ip = Ipv4Addr::new(198, 18, 7, 255);
-        let resp = build_a_response(0x0001, "a.b.c", ip);
-        // Last 4 bytes of the answer section are the IPv4 RDATA.
-        let n = resp.len();
-        assert_eq!(
-            &resp[n - 4..],
-            &ip.octets(),
-            "RDATA must contain the fake IP"
-        );
-    }
-
-    #[test]
-    fn build_a_response_uses_name_compression() {
-        let resp = build_a_response(0x0001, "example.com", Ipv4Addr::new(198, 18, 0, 1));
-        // The answer section starts right after the question section.
-        // Question section starts at byte 12; its size is:
-        //   7+1 + 3+1 + 1 (QNAME) + 2 (QTYPE) + 2 (QCLASS)
-        //   = 8 + 4 + 1 + 4 = 17 bytes
-        // So answer section starts at byte 12 + 17 = 29.
-        let qname_len: usize = 1 + 7 + 1 + 3 + 1; // len+label+len+label+0
-        let question_len = qname_len + 2 + 2;
-        let ans_start = 12 + question_len;
-        // First two bytes of the answer NAME field must be the compression pointer.
-        assert_eq!(
-            u16::from_be_bytes([resp[ans_start], resp[ans_start + 1]]),
-            0xC00C,
-            "answer NAME must use 0xC00C compression pointer"
-        );
-    }
-
-    #[test]
-    fn build_empty_response_header_fields() {
-        let id = 0x5678;
-        let resp = build_empty_response(id, "example.com", 28 /* AAAA */);
-
-        assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), id);
-        assert_eq!(u16::from_be_bytes([resp[2], resp[3]]), 0x8180);
-        assert_eq!(
-            u16::from_be_bytes([resp[4], resp[5]]),
-            1,
-            "QDCOUNT must be 1"
-        );
-        assert_eq!(
-            u16::from_be_bytes([resp[6], resp[7]]),
-            0,
-            "ANCOUNT must be 0 for empty response"
-        );
-    }
-
-    #[test]
-    fn build_empty_response_echoes_qtype() {
-        let resp = build_empty_response(0x0001, "example.com", 28);
-        // QTYPE sits at offset 12 + QNAME-length (15 bytes for "example.com") = 27.
-        let qname_len: usize = 1 + 7 + 1 + 3 + 1; // "example.com"
-        let qtype_offset = 12 + qname_len;
-        let echoed_qtype = u16::from_be_bytes([resp[qtype_offset], resp[qtype_offset + 1]]);
-        assert_eq!(
-            echoed_qtype, 28,
-            "QTYPE in question section must match input"
-        );
-    }
-
-    #[test]
-    fn parse_build_roundtrip() {
-        let mut dns = FakeDns::new();
-        let query = make_query(0xCAFE, "roundtrip.test", 1 /* A */);
-
-        let (id, domain, qtype) = parse_query(&query).expect("query should parse");
-        assert_eq!(qtype, 1);
-
-        let fake_ip = dns.resolve(&domain);
-        let response = build_a_response(id, &domain, fake_ip);
-
-        // Verify the response header correctly echoes the transaction ID.
-        assert_eq!(
-            u16::from_be_bytes([response[0], response[1]]),
-            0xCAFE,
-            "transaction ID must be preserved through the round-trip"
-        );
-        // Verify the fake IP appears in the RDATA.
-        let n = response.len();
-        assert_eq!(
-            Ipv4Addr::from(<[u8; 4]>::try_from(&response[n - 4..]).unwrap()),
-            fake_ip,
-        );
+        assert_eq!(response.len(), query.len());
     }
 }

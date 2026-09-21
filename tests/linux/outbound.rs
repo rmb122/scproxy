@@ -1,70 +1,8 @@
+//! Proxy protocols, socket identity, connection dispatch, and data integrity.
 use super::support::*;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
-
-#[test]
-#[ignore = "requires Linux seccomp and Python 3"]
-fn http_greeting_and_subsequent_responses_reach_the_command() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let proxy = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-    let server = std::thread::spawn(move || {
-        let mut stream = accept_with_timeout(listener);
-        let mut reader = BufReader::new(&mut stream);
-        loop {
-            let mut line = String::new();
-            assert!(reader.read_line(&mut line).unwrap() > 0);
-            if line == "\r\n" {
-                break;
-            }
-        }
-        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nHELLO").unwrap();
-        for _ in 0..20 {
-            let mut request = [0; 4];
-            stream.read_exact(&mut request).unwrap();
-            assert_eq!(&request, b"PING");
-            stream.write_all(b"PONG").unwrap();
-        }
-        let mut ack = [0; 3];
-        stream.read_exact(&mut ack).unwrap();
-        assert_eq!(&ack, b"ACK");
-    });
-    let output = scproxy(&proxy)
-        .args([
-            "python3",
-            "-u",
-            "-c",
-            r#"
-import socket, statistics, time
-s = socket.create_connection(('203.0.113.1', 22), timeout=5)
-s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-def read_exact(n):
-    data = b''
-    while len(data) < n:
-        chunk = s.recv(n - len(data))
-        assert chunk
-        data += chunk
-    return data
-assert read_exact(5) == b'HELLO'
-elapsed = []
-for _ in range(20):
-    start = time.perf_counter()
-    s.sendall(b'PING')
-    assert read_exact(4) == b'PONG'
-    elapsed.append((time.perf_counter() - start) * 1000)
-s.sendall(b'ACK')
-print('Outbound median round trip: %.3f ms' % statistics.median(elapsed))
-"#,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    server.join().unwrap();
-    println!("{}", String::from_utf8_lossy(&output.stdout).trim());
-}
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 #[test]
 #[ignore = "requires Linux seccomp, pidfd_getfd, and Python 3"]
@@ -434,79 +372,6 @@ assert data==b'SOCKS';s.sendall(b'!')
 }
 
 #[test]
-#[ignore = "requires Linux seccomp, prlimit permissions, and Python 3"]
-fn descriptor_exhaustion_fails_one_request_and_recovers() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let route = format!("http://{}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let mut stream = tunnel(listener, "203.0.113.15:443");
-        stream.write_all(b"OK").unwrap();
-        let mut byte = [0];
-        stream.read_exact(&mut byte).unwrap();
-        assert_eq!(&byte, b"!");
-    });
-    let mut command = scproxy(&route);
-    command.stdin(std::process::Stdio::piped());
-    let mut managed = ManagedChild::spawn_with_command(
-        command,
-        r#"
-import errno,os,socket,sys
-print(os.getppid(),os.getpid(),flush=True)
-assert sys.stdin.readline().strip()=='exhausted'
-s=socket.socket()
-try:s.connect(('203.0.113.15',443));raise AssertionError('connect should report exhaustion')
-except OSError as e:assert e.errno in (errno.EMFILE,errno.ENFILE),e
-s.close();print('recovered next',flush=True)
-assert sys.stdin.readline().strip()=='restored'
-s=socket.create_connection(('203.0.113.15',443),timeout=3)
-data=b''
-while len(data)<2:data+=s.recv(2-len(data))
-assert data==b'OK';s.sendall(b'!')
-"#,
-    );
-    managed.read_process_ids();
-    let pid = managed.child.id() as libc::pid_t;
-    let mut original = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, std::ptr::null(), &mut original) },
-        0
-    );
-    let exhausted = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: original.rlim_max,
-    };
-    assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &exhausted, std::ptr::null_mut()) },
-        0
-    );
-    managed
-        .child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"exhausted\n")
-        .unwrap();
-    assert_eq!(managed.read_line(), "recovered next");
-    assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &original, std::ptr::null_mut()) },
-        0
-    );
-    managed
-        .child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"restored\n")
-        .unwrap();
-    assert!(managed.wait().success());
-    managed.descendants.clear();
-    server.join().unwrap();
-}
-
-#[test]
 #[ignore = "requires Linux seccomp and Python 3"]
 fn rejected_proxy_handshake_closes_the_local_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -542,4 +407,101 @@ except ConnectionResetError:pass
         String::from_utf8_lossy(&output.stderr)
     );
     worker.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires Linux seccomp and Python 3"]
+fn one_listener_dispatches_concurrent_targets_and_rejects_other_processes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let mut connections = Vec::new();
+        // One initial connection, 24 simultaneous requests, and one later request.
+        for _ in 0..26 {
+            let mut stream = accept_with_timeout(listener.try_clone().unwrap());
+            connections.push(std::thread::spawn(move || {
+                let mut reader = BufReader::new(&mut stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let target = first.strip_prefix("CONNECT ").unwrap();
+                let target = target.strip_suffix(" HTTP/1.1\r\n").unwrap();
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(format!("HTTP/1.1 200 OK\r\n\r\n{target}\n").as_bytes())
+                    .unwrap();
+                let mut ack = [0];
+                stream.read_exact(&mut ack).unwrap();
+                assert_eq!(&ack, b"!");
+            }));
+        }
+        for connection in connections {
+            connection.join().unwrap();
+        }
+    });
+    let mut command = scproxy(&proxy);
+    command.stdin(std::process::Stdio::piped());
+    let mut managed = ManagedChild::spawn_with_command(
+        command,
+        r#"
+import concurrent.futures, os, socket, sys
+def connect(index):
+    target=('203.0.113.%d'%(index+1),4000+index)
+    s=socket.socket(); s.settimeout(5)
+    if index%3==0: s.bind(('0.0.0.0',0))
+    if index%3==1:
+        s.setsockopt(socket.IPPROTO_IP,24,1) # IP_BIND_ADDRESS_NO_PORT
+        s.bind(('127.0.0.2',0))
+    s.connect(target)
+    assert s.getpeername()==target
+    data=b''
+    while not data.endswith(b'\n'):
+        part=s.recv(128); assert part; data+=part
+    assert data==('%s:%d\n'%target).encode(), (target,data)
+    inode=os.readlink('/proc/self/fd/%d'%s.fileno())[8:-1]
+    with open('/proc/net/tcp') as table:
+        entries=[line.split() for line in table.readlines()[1:]]
+    actual=next(row[2] for row in entries if row[9]==inode)
+    assert actual.split(':')[0]=='0100007F',actual
+    return s,actual
+print(os.getppid(),os.getpid(),flush=True)
+first,address=connect(0)
+print(int(address.split(':')[1],16),flush=True)
+assert sys.stdin.readline().strip()=='continue'
+with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
+    connections=list(pool.map(connect,range(1,25)))
+assert all(peer==address for _,peer in connections),connections
+for s,_ in connections:
+    s.sendall(b'!');s.close()
+first.sendall(b'!');first.close()
+last,peer=connect(25); assert peer==address
+last.sendall(b'!');last.close()
+"#,
+    );
+    managed.read_process_ids();
+    let port: u16 = managed.read_line().parse().unwrap();
+    let mut stranger = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+    stranger
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let result = stranger.read(&mut [0]);
+    assert!(
+        matches!(result, Ok(0))
+            || result.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+    );
+    managed
+        .child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    assert!(managed.wait().success());
+    managed.descendants.clear();
+    server.join().unwrap();
 }

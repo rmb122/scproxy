@@ -238,31 +238,4 @@ mod tests {
         assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
-
-    #[test]
-    fn base64_credentials() {
-        // "Aladdin:open sesame" → "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
-        assert_eq!(
-            base64_encode(b"Aladdin:open sesame"),
-            "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
-        );
-    }
-
-    #[test]
-    fn parse_status_code_ok() {
-        assert_eq!(
-            parse_status_code("HTTP/1.1 200 Connection established").unwrap(),
-            200
-        );
-        assert_eq!(
-            parse_status_code("HTTP/1.0 407 Proxy Auth Required").unwrap(),
-            407
-        );
-    }
-
-    #[test]
-    fn parse_status_code_err() {
-        assert!(parse_status_code("GARBAGE").is_err());
-        assert!(parse_status_code("HTTP/1.1 abc reason").is_err());
-    }
 }

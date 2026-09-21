@@ -174,75 +174,60 @@ impl RuleMatcher {
 mod tests {
     use super::*;
 
-    fn direct() -> ProxyConfig {
-        ProxyConfig::Direct
-    }
-
-    fn v4(value: &str) -> Ipv4Addr {
-        value.parse().unwrap()
-    }
-
     #[test]
-    fn requires_match_and_proxy() {
-        assert!(RuleMatcher::from_specs(&["ip:1.2.3.4"]).is_err());
-        assert!(RuleMatcher::from_specs(&["=direct"]).is_err());
-        assert!(RuleMatcher::from_specs(&["ip:1.2.3.4="]).is_err());
-        assert!(RuleMatcher::from_specs(&["ip:1.2.3.4=unknown"]).is_err());
-    }
-
-    #[test]
-    fn exact_ip_rule_returns_its_proxy() {
-        let rules = RuleMatcher::from_specs(&["ip:1.2.3.4=direct"]).unwrap();
-        assert_eq!(rules.match_ip(v4("1.2.3.4")), Some(&direct()));
-        assert_eq!(rules.match_ip(v4("1.2.3.5")), None);
-    }
-
-    #[test]
-    fn longest_ip_prefix_wins() {
+    fn ip_rules_use_longest_prefix_then_first_match() {
         let rules = RuleMatcher::from_specs(&[
             "cidr:10.0.0.0/8=direct",
-            "cidr:10.1.0.0/16=socks5://127.0.0.1:1081",
+            "cidr:10.1.0.0/16=socks5://127.0.0.1:1080",
+            "ip:10.1.2.3=http://127.0.0.1:8080",
+            "cidr:10.1.2.3/32=direct",
         ])
         .unwrap();
+        let matched = |address: &str| rules.match_ip(address.parse().unwrap());
         assert!(matches!(
-            rules.match_ip(v4("10.1.2.3")),
+            matched("10.1.2.3"),
+            Some(ProxyConfig::Http { .. })
+        ));
+        assert!(matches!(
+            matched("10.1.3.4"),
             Some(ProxyConfig::Socks5 { .. })
         ));
-        assert_eq!(rules.match_ip(v4("10.2.2.3")), Some(&direct()));
+        assert_eq!(matched("10.2.3.4"), Some(&ProxyConfig::Direct));
+        assert_eq!(matched("11.0.0.1"), None);
     }
 
     #[test]
-    fn first_ip_rule_wins_equal_prefix_tie() {
+    fn domain_rules_preserve_exact_matching_and_rule_order() {
         let rules = RuleMatcher::from_specs(&[
-            "ip:1.1.1.1=direct",
-            "cidr:1.1.1.1/32=http://127.0.0.1:8080",
+            "domain:Example.COM=direct",
+            r"domain-regex:.*\.example\.net=direct",
+            "domain:www.example.net=http://127.0.0.1:8080",
         ])
         .unwrap();
-        assert_eq!(rules.match_ip(v4("1.1.1.1")), Some(&direct()));
-    }
-
-    #[test]
-    fn first_matching_domain_rule_wins_in_mixed_order() {
-        let rules = RuleMatcher::from_specs(&[
-            r"domain-regex:.*\.example\.com=direct",
-            "domain:www.example.com=http://127.0.0.1:8080",
-        ])
-        .unwrap();
-        assert_eq!(rules.match_domain("www.example.com"), Some(&direct()));
-    }
-
-    #[test]
-    fn domain_literal_is_exact_and_case_insensitive() {
-        let rules = RuleMatcher::from_specs(&["domain:Example.COM=direct"]).unwrap();
-        assert_eq!(rules.match_domain("example.com"), Some(&direct()));
+        assert_eq!(
+            rules.match_domain("example.com"),
+            Some(&ProxyConfig::Direct)
+        );
         assert_eq!(rules.match_domain("sub.example.com"), None);
+        assert_eq!(
+            rules.match_domain("www.example.net"),
+            Some(&ProxyConfig::Direct)
+        );
     }
 
     #[test]
-    fn rejects_bad_match_specs() {
-        assert!(RuleMatcher::from_specs(&["foo:bar=direct"]).is_err());
-        assert!(RuleMatcher::from_specs(&["cidr:1.2.3.4/40=direct"]).is_err());
-        assert!(RuleMatcher::from_specs(&["domain-regex:[=direct"]).is_err());
-        assert!(RuleMatcher::from_specs(&["ip:2001:db8::1=direct"]).is_err());
+    fn invalid_rules_are_rejected() {
+        for rule in [
+            "ip:1.2.3.4",
+            "=direct",
+            "ip:1.2.3.4=",
+            "ip:1.2.3.4=unknown",
+            "foo:bar=direct",
+            "cidr:1.2.3.4/40=direct",
+            "domain-regex:[=direct",
+            "ip:2001:db8::1=direct",
+        ] {
+            assert!(RuleMatcher::from_specs(&[rule]).is_err(), "{rule}");
+        }
     }
 }

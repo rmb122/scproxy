@@ -172,17 +172,24 @@ does not add this drain period to the command tree's termination grace period.
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
-cargo test -- --ignored --test-threads=1
+cargo test --bin scproxy
+cargo test --bin scproxy -- --ignored --test-threads=1
+cargo test --test linux -- --ignored --test-threads=1
 ```
 
-Ignored tests exercise real kernel interfaces. They require the permissions
-above, Python 3, a C compiler, and static libc development files. Tests use local
-proxy fixtures and need no public Internet connection, `unshare`, or `mount`.
-Coverage includes operation with namespace creation denied, sealed configuration
-FDs, UDP/TCP DNS and resolver-source preservation, static executables, dup/fork/
-epoll, peer-address socket options, urgent-data rejection, backpressure and EOF,
-permission failures, resource exhaustion, and lifecycle.
+Unit tests live beside their implementation in `#[cfg(test)] mod tests`. They
+cover routing, DNS mapping and packet handling, and deterministic regressions
+for protocol handshakes, connection races, and cancellation. Kernel-backed unit
+tests are marked ignored and run separately.
+
+The single `linux` integration target groups essential behavior into
+`capabilities`, `network`, `resolver`, `outbound`, and `lifecycle` scenarios.
+Shared helpers live in `tests/linux/support.rs` and `tests/fixtures/`.
+Integration tests cover proxy and DNS operation, static programs, descriptor
+identity, peer addresses, urgent-data rejection, backpressure and EOF, startup
+failures, and command-tree cleanup. These tests require the permissions above,
+Python 3, a C compiler, and static libc development files. They use local proxy
+fixtures and need no public Internet connection or namespace creation.
 
 ## Origin and license
 

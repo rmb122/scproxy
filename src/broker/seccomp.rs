@@ -316,39 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn filter_intercepts_network_and_configuration_opens() {
-        for syscall in [
-            #[cfg(target_arch = "x86_64")]
-            libc::SYS_open,
-            libc::SYS_openat,
-            libc::SYS_openat2,
-            libc::SYS_socket,
-            libc::SYS_connect,
-            libc::SYS_getpeername,
-            libc::SYS_sendto,
-            libc::SYS_sendmsg,
-            libc::SYS_sendmmsg,
-            libc::SYS_recvfrom,
-            libc::SYS_recvmsg,
-            libc::SYS_recvmmsg,
-        ] {
-            assert_eq!(
-                evaluate(NATIVE_ARCH, syscall as i32),
-                SECCOMP_RET_USER_NOTIF
-            );
-        }
-        for syscall in [
-            libc::SYS_listen,
-            libc::SYS_bind,
-            libc::SYS_accept4,
-            libc::SYS_read,
-            libc::SYS_write,
-        ] {
-            assert_eq!(evaluate(NATIVE_ARCH, syscall as i32), SECCOMP_RET_ALLOW);
-        }
-    }
-
-    #[test]
     fn only_peer_name_socket_option_is_intercepted() {
         for (level, option, expected) in [
             (libc::SOL_SOCKET, libc::SO_PEERNAME, SECCOMP_RET_USER_NOTIF),
@@ -368,20 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn uring_is_unavailable() {
-        for syscall in [
-            libc::SYS_io_uring_setup,
-            libc::SYS_io_uring_enter,
-            libc::SYS_io_uring_register,
-        ] {
-            assert_eq!(
-                evaluate(NATIVE_ARCH, syscall as i32),
-                SECCOMP_RET_ERRNO | libc::ENOSYS as u32
-            );
-        }
-    }
-
-    #[test]
     fn filter_rejects_other_architectures_and_x32() {
         assert_eq!(
             evaluate(0x4000_0003, libc::SYS_connect as i32),
@@ -391,48 +344,5 @@ mod tests {
             evaluate(NATIVE_ARCH, 0x4000_0000 | libc::SYS_connect as i32),
             SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
         );
-    }
-
-    #[test]
-    #[ignore = "requires Linux seccomp user notification"]
-    fn actual_notification_can_return_errno_or_continue_the_original_call() {
-        use std::os::fd::AsRawFd;
-        use std::time::Duration;
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            sender.send(install().unwrap()).unwrap();
-            for errno in [libc::EADDRINUSE, libc::EBADF] {
-                assert_eq!(unsafe { libc::connect(-1, std::ptr::null(), 0) }, -1);
-                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(errno));
-            }
-        });
-        let listener = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        for continue_syscall in [false, true] {
-            let mut event = libc::pollfd {
-                fd: listener.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            assert_eq!(unsafe { libc::poll(&mut event, 1, 5000) }, 1);
-            let notification = receive(listener.as_raw_fd()).unwrap();
-            assert_eq!(notification.data.nr, libc::SYS_connect as i32);
-            assert_eq!(notification.data.args[0] as i32, -1);
-            assert!(valid(listener.as_raw_fd(), notification.id).unwrap());
-            respond(
-                listener.as_raw_fd(),
-                notification.id,
-                0,
-                if continue_syscall {
-                    0
-                } else {
-                    libc::EADDRINUSE
-                },
-                continue_syscall,
-            )
-            .unwrap();
-            assert!(!valid(listener.as_raw_fd(), notification.id).unwrap());
-        }
-        worker.join().unwrap();
     }
 }

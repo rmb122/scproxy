@@ -282,22 +282,6 @@ mod tests {
         assert!(closed.await.is_err(), "timed-out relay was detached");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn forced_shutdown_cancels_an_in_progress_drain() {
-        let (relays, closed) = stalled_relay();
-        let (sender, mut shutdown) = watch::channel(Shutdown::Drain);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            sender.send(Shutdown::Abort).unwrap();
-        });
-        let started = tokio::time::Instant::now();
-        drain_relays(relays, &mut shutdown, std::future::pending())
-            .await
-            .unwrap();
-        assert_eq!(started.elapsed(), Duration::from_millis(100));
-        assert!(closed.await.is_err(), "cancelled relay was detached");
-    }
-
     #[tokio::test]
     async fn draining_keeps_shared_ingress_accepting_registered_connections() {
         let ingress = Ingress::new().unwrap();

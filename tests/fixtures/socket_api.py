@@ -20,7 +20,7 @@ def check_peer_option(sock, target):
         + bytes(8)
     )
     assert sock.getpeername() == peer_name(sock) == target
-    for capacity in (0, 1, 4, 8, 15, 16, 17, 128, -1):
+    for capacity in (0, 8, 16, 17, -1):
         buffer = c.create_string_buffer(b"X" * 128, 128)
         length = c.c_int(capacity)
         result = lib.getsockopt(

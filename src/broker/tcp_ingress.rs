@@ -165,5 +165,116 @@ impl Drop for Registration {
 }
 
 #[cfg(test)]
-#[path = "tcp_ingress/tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use std::os::fd::AsFd;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct Running {
+        ingress: Arc<Ingress>,
+        task: tokio::task::JoinHandle<io::Result<()>>,
+    }
+
+    impl Running {
+        fn new() -> Self {
+            let ingress = Ingress::new().unwrap();
+            let service = ingress.clone();
+            let task = tokio::spawn(async move { service.run().await });
+            Self { ingress, task }
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn connect(socket: &OwnedFd, address: SocketAddrV4) {
+        let result = sockets::connect(socket.as_raw_fd(), address);
+        assert!(
+            result.is_ok()
+                || result.as_ref().unwrap_err().raw_os_error() == Some(libc::EINPROGRESS),
+            "{result:?}"
+        );
+    }
+
+    fn stream(socket: &OwnedFd) -> TcpStream {
+        let copy = socket.as_fd().try_clone_to_owned().unwrap();
+        TcpStream::from_std(std::net::TcpStream::from(copy)).unwrap()
+    }
+
+    fn bound(ip: Ipv4Addr, port: u16) -> OwnedFd {
+        let socket = sockets::stream().unwrap();
+        let address = sockets::sockaddr(SocketAddrV4::new(ip, port));
+        sockets::check(unsafe {
+            libc::bind(
+                socket.as_raw_fd(),
+                (&address as *const libc::sockaddr_in).cast(),
+                std::mem::size_of_val(&address) as _,
+            )
+        })
+        .unwrap();
+        socket
+    }
+
+    #[tokio::test]
+    async fn reversed_accepts_match_source_ip_and_port_before_publication() {
+        let running = Running::new();
+        let first = bound(Ipv4Addr::new(127, 0, 0, 2), 0);
+        let port = sockets::address(first.as_raw_fd(), false).unwrap().port();
+        let second = bound(Ipv4Addr::new(127, 0, 0, 3), port);
+        let first = running.ingress.register(first);
+        let second = running.ingress.register(second);
+        let first_socket = first.socket.clone();
+        let second_socket = second.socket.clone();
+        connect(&second_socket, running.ingress.address);
+        second.connected().unwrap();
+        connect(&first_socket, running.ingress.address);
+        // Omit first.connected(): accept must find the unpublished source itself.
+        let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(first.accept(), second.accept())
+        })
+        .await
+        .unwrap();
+        let mut first = first.unwrap();
+        let mut second = second.unwrap();
+        stream(&first_socket).write_all(b"first").await.unwrap();
+        stream(&second_socket).write_all(b"other").await.unwrap();
+        let mut bytes = [0; 5];
+        first.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"first");
+        second.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"other");
+    }
+
+    #[tokio::test]
+    async fn accept_drains_strangers_while_original_blocking_connect_runs() {
+        let ingress = Ingress::new().unwrap();
+        assert_eq!(unsafe { libc::listen(ingress.listener.as_raw_fd(), 1) }, 0);
+        // Fill the small accept queue before starting the independent accept loop.
+        let first = std::net::TcpStream::connect(ingress.address).unwrap();
+        let second = std::net::TcpStream::connect(ingress.address).unwrap();
+        let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(raw >= 0);
+        use std::os::fd::FromRawFd;
+        let registration = ingress.register(unsafe { OwnedFd::from_raw_fd(raw) });
+        let socket = registration.socket.clone();
+        let address = ingress.address;
+        let connecting =
+            tokio::task::spawn_blocking(move || sockets::connect(socket.as_raw_fd(), address));
+        let service = ingress.clone();
+        let running = Running {
+            ingress,
+            task: tokio::spawn(async move { service.run().await }),
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            connecting.await.unwrap().unwrap();
+            registration.connected().unwrap();
+            registration.accept().await.unwrap();
+        })
+        .await
+        .expect("accept must keep running while connect waits");
+        drop((first, second, running));
+    }
+}

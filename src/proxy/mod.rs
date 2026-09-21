@@ -215,31 +215,16 @@ impl AsyncWrite for ProxyStream {
 }
 
 #[cfg(test)]
-mod config_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn parses_direct_and_proxy_urls() {
+    fn proxy_urls_validate_routes_and_addresses() {
         assert_eq!(ProxyConfig::parse("direct").unwrap(), ProxyConfig::Direct);
-        assert!(matches!(
-            ProxyConfig::parse("socks5://127.0.0.1:1080").unwrap(),
-            ProxyConfig::Socks5 { auth: None, .. }
-        ));
         assert!(matches!(
             ProxyConfig::parse("http://user:pass@127.0.0.1:8080").unwrap(),
             ProxyConfig::Http { auth: Some(_), .. }
         ));
-    }
-
-    #[test]
-    fn rejects_unknown_or_invalid_proxies() {
-        assert!(ProxyConfig::parse("").is_err());
-        assert!(ProxyConfig::parse("ftp://127.0.0.1:21").is_err());
-        assert!(ProxyConfig::parse("socks5://not-an-address").is_err());
-    }
-
-    #[test]
-    fn parses_hostname_and_ipv6_proxy_addresses_without_resolving_targets() {
         for url in [
             "socks5://localhost:1080",
             "http://user:pass@proxy:8080",
@@ -248,6 +233,9 @@ mod config_tests {
             assert!(ProxyConfig::parse(url).is_ok(), "{url}");
         }
         for url in [
+            "",
+            "ftp://127.0.0.1:21",
+            "socks5://not-an-address",
             "http://:80",
             "http://host:invalid",
             "http://host:65536",

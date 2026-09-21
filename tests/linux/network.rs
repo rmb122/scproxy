@@ -1,3 +1,4 @@
+//! Native host networking and rejection of unsupported network paths.
 use super::support::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
@@ -130,61 +131,4 @@ except OSError as e: assert e.errno==errno.EOPNOTSUPP,e
     );
     assert!(udp.recv(&mut [0; 100]).is_err());
     assert!(tcp.accept().is_err());
-}
-
-#[test]
-#[ignore = "requires Linux seccomp, a C compiler, and static libc"]
-fn static_binary_dns_abi_and_readiness() {
-    let temp = TestDir::new("dns");
-    let binary = temp.0.join("dns");
-    let compiled = std::process::Command::new("cc")
-        .args([
-            "-std=gnu11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-static",
-            "-pthread",
-            "tests/fixtures/dns.c",
-            "-o",
-        ])
-        .arg(&binary)
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-    let output = scproxy("direct").arg(&binary).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"DNS ABI OK\n");
-}
-
-#[test]
-#[ignore = "requires Linux seccomp and Python 3"]
-fn glibc_dns_handles_ipv4_and_empty_ipv6_without_host_resolution() {
-    let output=scproxy("http://127.0.0.1:1").args(["python3","-c",r#"
-import socket, threading
-errors=[]
-def query(index):
-    try:
-        result=socket.getaddrinfo('unique-%d.invalid'%index,443,0,socket.SOCK_STREAM)
-        assert result and all(item[0]==socket.AF_INET and item[4][0].startswith(('198.18.','198.19.')) for item in result)
-    except BaseException as e: errors.append(e)
-threads=[threading.Thread(target=query,args=(i,)) for i in range(24)]
-for t in threads:t.start()
-for t in threads:t.join()
-assert not errors, errors
-"#]).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

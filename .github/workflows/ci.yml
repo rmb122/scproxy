@@ -10,8 +10,9 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: cargo test --locked -- --ignored --test-threads=1
+      - run: cargo test --locked --bin scproxy
+      - run: cargo test --locked --bin scproxy -- --ignored --test-threads=1
+      - run: cargo test --locked --test linux -- --ignored --test-threads=1
   build:
     strategy:
       matrix:

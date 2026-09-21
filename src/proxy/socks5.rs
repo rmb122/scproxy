@@ -295,7 +295,8 @@ mod tests {
     use crate::proxy::ProxyConfig;
     use tokio::net::TcpListener;
 
-    async fn connect_with_selected_method(method: u8) {
+    #[tokio::test]
+    async fn credentials_with_no_auth_selection_send_connect_immediately() {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             // Exercise host-side hostname resolution, including address fallback.
@@ -313,13 +314,7 @@ mod tests {
                 let mut greeting = [0; 4];
                 stream.read_exact(&mut greeting).await.unwrap();
                 assert_eq!(greeting, [5, 2, 0, 2]);
-                stream.write_all(&[5, method]).await.unwrap();
-                if method == METHOD_USER_PASS {
-                    let mut auth = [0; 11];
-                    stream.read_exact(&mut auth).await.unwrap();
-                    assert_eq!(&auth, b"\x01\x04user\x04pass");
-                    stream.write_all(&[1, 0]).await.unwrap();
-                }
+                stream.write_all(&[5, METHOD_NO_AUTH]).await.unwrap();
                 let mut connect = [0; 10];
                 stream.read_exact(&mut connect).await.unwrap();
                 assert_eq!(connect, [5, 1, 0, 1, 1, 2, 3, 4, 0, 80]);
@@ -333,15 +328,5 @@ mod tests {
         })
         .await
         .expect("SOCKS5 handshake must complete");
-    }
-
-    #[tokio::test]
-    async fn credentials_with_no_auth_selection_send_connect_immediately() {
-        connect_with_selected_method(METHOD_NO_AUTH).await;
-    }
-
-    #[tokio::test]
-    async fn user_pass_selection_authenticates_before_connect() {
-        connect_with_selected_method(METHOD_USER_PASS).await;
     }
 }

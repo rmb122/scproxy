@@ -1,3 +1,4 @@
+//! Startup requirements and legacy descriptor access.
 use super::support::*;
 use std::process::Command;
 
@@ -40,18 +41,19 @@ fn filtered(mode: &str, command: Command) -> Command {
 }
 #[test]
 #[ignore = "requires Linux seccomp, pidfd_getfd, and Python 3"]
-fn unavailable_and_denied_interfaces_fail_before_command_exec() {
-    for mode in ["unavailable", "denied"] {
+fn missing_or_denied_capabilities_fail_before_command_exec() {
+    for (mode, expected) in [
+        ("unavailable", "pidfd"),
+        ("denied", "Operation not permitted"),
+        ("no-addfd", "ADDFD_SEND"),
+    ] {
         let mut command = scproxy("direct");
         command.args(["sh", "-c", "printf 'unexpected exec'"]);
         let output = filtered(mode, command).output().unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains("pidfd"), "{error}");
-        if mode == "denied" {
-            assert!(error.contains("Operation not permitted"), "{error}");
-        }
+        assert!(error.contains(expected), "{error}");
     }
 }
 #[test]
@@ -97,15 +99,4 @@ print('no namespaces OK')
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"no namespaces OK\n");
-}
-
-#[test]
-#[ignore = "requires Linux seccomp, pidfd_getfd, and Python 3"]
-fn missing_atomic_fd_injection_fails_before_command_exec() {
-    let mut command = scproxy("direct");
-    command.args(["sh", "-c", "printf 'unexpected exec'"]);
-    let output = filtered("no-addfd", command).output().unwrap();
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("ADDFD_SEND"));
 }

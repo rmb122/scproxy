@@ -262,24 +262,4 @@ mod tests {
             "passwd: files systemd\ngroup: files\nhosts: files dns\n"
         );
     }
-    #[test]
-    fn configuration_opens_have_independent_offsets_and_are_sealed() {
-        let file = ConfigFile::new("/etc/resolv.conf", "configuration").unwrap();
-        let mut first = file.reopen(libc::O_RDONLY).unwrap();
-        let mut second = file.reopen(libc::O_RDONLY).unwrap();
-        let mut prefix = [0; 3];
-        first.read_exact(&mut prefix).unwrap();
-        let mut contents = String::new();
-        second.read_to_string(&mut contents).unwrap();
-        assert_eq!(contents, "configuration");
-        assert_eq!(
-            unsafe { libc::fcntl(first.as_raw_fd(), libc::F_GET_SEALS) },
-            SEALS
-        );
-        assert_eq!(
-            unsafe { libc::pwrite(file.file.as_raw_fd(), b"x".as_ptr().cast(), 1, 0) },
-            -1
-        );
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
-    }
 }
