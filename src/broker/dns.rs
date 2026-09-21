@@ -1,9 +1,10 @@
-//! Fake DNS over UDP and TCP, sharing one bounded domain-to-address mapping.
+//! Route-aware DNS over UDP and TCP.
+mod lookup;
+mod resolver;
+
 use crate::config::net::{DNS_ADDR, DNS_PORT};
-use crate::{
-    fake_dns::{self, FakeDns},
-    proxy::ProxyTarget,
-};
+use crate::{config::Config, proxy::ProxyTarget};
+pub(super) use resolver::Resolver;
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -27,14 +28,14 @@ struct Servers {
 }
 
 pub(super) struct Dns {
-    pub mapping: Arc<Mutex<FakeDns>>,
+    pub resolver: Arc<Resolver>,
     servers: Mutex<Servers>,
     tasks: Mutex<JoinSet<io::Result<()>>>,
 }
 impl Dns {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(config: Arc<Config>) -> io::Result<Self> {
         let dns = Self {
-            mapping: Arc::new(Mutex::new(FakeDns::new())),
+            resolver: Arc::new(Resolver::new(config)),
             servers: Mutex::new(Servers::default()),
             tasks: Mutex::new(JoinSet::new()),
         };
@@ -60,8 +61,11 @@ impl Dns {
         };
         socket.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(socket)?;
-        let mapping = self.mapping.clone();
-        self.tasks.lock().unwrap().spawn(serve_udp(socket, mapping));
+        let resolver = self.resolver.clone();
+        self.tasks
+            .lock()
+            .unwrap()
+            .spawn(serve_udp(socket, resolver));
         // Distinct local endpoints preserve the source of overlapping requests
         // to multiple resolvers, even on one application socket with equal IDs.
         servers.forward.insert(destination, local);
@@ -74,20 +78,11 @@ impl Dns {
     }
 
     pub fn target(&self, address: SocketAddrV4) -> ProxyTarget {
-        let mapping = self.mapping.lock().unwrap();
-        if mapping.is_fake_ip(*address.ip())
-            && let Some(domain) = mapping.lookup(*address.ip())
-        {
-            ProxyTarget::Domain {
-                host: domain.to_owned(),
-                port: address.port(),
-            }
-        } else {
-            ProxyTarget::Ip {
-                addr: (*address.ip()).into(),
-                port: address.port(),
-            }
-        }
+        self.resolver.target(address)
+    }
+
+    pub fn is_direct(&self, address: Ipv4Addr) -> bool {
+        self.resolver.is_direct(address)
     }
 
     pub async fn run(&self) -> io::Result<()> {
@@ -99,21 +94,19 @@ impl Dns {
     }
 }
 
-fn answer(mapping: &Mutex<FakeDns>, query: &[u8]) -> Option<Vec<u8>> {
-    let (id, domain, kind) = fake_dns::parse_query(query)?;
-    Some(if kind == 1 {
-        let ip = mapping.lock().unwrap().resolve(&domain);
-        tracing::debug!(%domain, %ip, "fake DNS");
-        fake_dns::build_a_response(id, &domain, ip)
-    } else {
-        fake_dns::build_empty_response(id, &domain, kind)
-    })
-}
-
-async fn serve_udp(socket: UdpSocket, mapping: Arc<Mutex<FakeDns>>) -> io::Result<()> {
+async fn serve_udp(socket: UdpSocket, resolver: Arc<Resolver>) -> io::Result<()> {
+    let socket = Arc::new(socket);
+    let mut pending = JoinSet::new();
     let mut buffer = vec![0; 65536];
     loop {
-        let (length, source) = match socket.recv_from(&mut buffer).await {
+        let received = tokio::select! {
+            result = pending.join_next(), if !pending.is_empty() => {
+                if let Some(Err(error)) = result { return Err(io::Error::other(error)); }
+                continue;
+            },
+            result = socket.recv_from(&mut buffer), if pending.len() < 128 => result,
+        };
+        let (length, source) = match received {
             Ok(packet) => packet,
             Err(error) if matches!(error.raw_os_error(), Some(libc::ENOMEM | libc::ENOBUFS)) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -121,18 +114,20 @@ async fn serve_udp(socket: UdpSocket, mapping: Arc<Mutex<FakeDns>>) -> io::Resul
             }
             Err(error) => return Err(error),
         };
-        if let Some(response) = answer(&mapping, &buffer[..length])
-            && let Err(error) = socket.send_to(&response, source).await
-        {
-            tracing::debug!(%error, "DNS reply discarded");
-        }
+        let query = buffer[..length].to_vec();
+        let resolver = resolver.clone();
+        let socket = socket.clone();
+        pending.spawn(async move {
+            if let Some(response) = resolver.answer(&query, 512).await
+                && let Err(error) = socket.send_to(&response, source).await
+            {
+                tracing::debug!(%error, "DNS reply discarded");
+            }
+        });
     }
 }
 
-pub(super) async fn serve_tcp(
-    mut socket: TcpStream,
-    mapping: Arc<Mutex<FakeDns>>,
-) -> io::Result<()> {
+pub(super) async fn serve_tcp(mut socket: TcpStream, resolver: Arc<Resolver>) -> io::Result<()> {
     loop {
         let exchange = async {
             let mut prefix = [0; 2];
@@ -145,9 +140,12 @@ pub(super) async fn serve_tcp(
             }
             let mut query = vec![0; u16::from_be_bytes(prefix) as usize];
             socket.read_exact(&mut query).await?;
-            let response = answer(&mapping, &query).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid TCP DNS query")
-            })?;
+            let response = resolver
+                .answer(&query, u16::MAX as usize)
+                .await
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid TCP DNS query")
+                })?;
             let length = u16::try_from(response.len()).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "TCP DNS response is too large")
             })?;

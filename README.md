@@ -41,10 +41,16 @@ Routing rules use `MATCH=ROUTE`:
 | Domain | `domain:example.com=http://127.0.0.1:8080` | First matching domain rule; case insensitive |
 | Regex | `domain-regex:.*\.example\.com=socks5://127.0.0.1:1080` | First matching domain rule; regex flags control case sensitivity |
 
-Domain rules apply to names recovered from fake DNS. Numeric destinations use
-IP/CIDR rules. A `direct` domain route opts in to host-side DNS resolution.
+Domain rules select a route at DNS time, falling back to `-x`. Direct domains
+are resolved to real IPv4 addresses using the supervisor's host resolver;
+proxy domains receive FakeIPs and retain their names for proxy-side resolution.
+Direct DNS answers have a 60-second TTL. During that time their returned addresses
+take precedence over the default and IP/CIDR routes, so a subsequent connect
+keeps the DNS routing decision. This applies to all managed processes, including
+numeric connections to the same address; expired entries require a fresh lookup.
+Other numeric destinations use IP/CIDR rules, falling back to `-x`.
 IPv4 loopback (`127.0.0.0/8`) always connects directly to the host and bypasses
-these rules.
+these rules, except for intercepted DNS on port 53.
 
 ## Host networking and DNS
 
@@ -62,12 +68,21 @@ offset. Host configuration files are never modified, and there are no bind mount
 or `-b`/`--bind` options.
 
 Both UDP and TCP queries to any IPv4 address on port 53 are answered by the local
-fake resolver, including queries addressed to `127.0.0.53`. No host port 53
+resolver, including queries addressed to `127.0.0.53`. No host port 53
 reservation or interface configuration is needed. Replies report the originally
 requested DNS server; overlapping UDP requests to different servers remain
-separate even with the same transaction ID. A queries receive addresses from
-`198.18.0.0/15`; other types, including AAAA, receive empty answers. Mappings reuse
-the oldest addresses when the pool wraps, as in nsproxy-rs.
+separate even with the same transaction ID. A queries receive real IPv4 addresses
+for direct routes and synthetic addresses from `198.18.0.0/15` for proxy routes;
+other types, including AAAA, receive empty answers. FakeIP mappings reuse the
+oldest addresses when the pool wraps. The synthetic address pool is reserved and
+cannot be returned by direct lookups.
+
+Direct lookups use host NSS, including its hosts file. Unknown names return
+NXDOMAIN; resolution failures, overload and the five-second lookup timeout return
+SERVFAIL. Replies can contain multiple A records; oversized UDP replies set TC
+for a TCP retry. Up to 32 native resolver calls and 65536 unexpired direct
+addresses are tracked. Slow host lookups do not block proxy DNS or supervisor
+shutdown. Timed-out native lookups retain their worker slot until they finish.
 
 Connecting to a fake address recovers its domain for the proxy's remote
 resolution. The supervisor supports up to 128 distinct UDP resolver endpoints per
@@ -95,7 +110,11 @@ seccomp filter. It accesses the notifying thread's descriptors through
 The listener itself is obtained through pidfd after a `read/write` bootstrap;
 there is no exempt descriptor number that an application could later reuse.
 
-For outbound IPv4 TCP, the supervisor connects a duplicate of the **original
+Direct IPv4 TCP routes continue the application's original `connect` in the
+kernel. There is no local relay or second socket: connect errors, nonblocking
+readiness, source bindings, socket options and half-close use native TCP behavior.
+
+For proxied IPv4 TCP, the supervisor connects a duplicate of the **original
 socket** to a shared local relay, then connects the upstream route. Each scproxy
 instance keeps one dynamically allocated `127.0.0.1` TCP listener for its entire
 lifetime. Accepted connections are dispatched by source IP and port to registered
@@ -114,14 +133,14 @@ Because all relayed connections share one local destination, simultaneous socket
 bound to the same source IP and port cannot connect to different upstream targets.
 Socket-cookie metadata is reclaimed using periodic socket diagnostics.
 
-A successful `connect` or writable event means the local relay connected. A
-subsequent upstream failure appears as EOF/reset, rather than the upstream's
-original connect errno. Proxy handshake bytes never reach the application;
-prefetched tunnel data is preserved. Relays use bounded buffers and terminate
+For these relayed connections, a successful `connect` or writable event means
+the local relay connected. A subsequent upstream failure appears as EOF/reset,
+rather than the upstream's original connect errno. Proxy handshake bytes never
+reach the application; prefetched tunnel data is preserved. Relays use bounded buffers and terminate
 both directions after either EOF, once queued data has drained. Independent
 half-close support and waiting for later responses after half-close are
-intentionally unsupported. Native host localhost connections retain kernel
-closure semantics.
+intentionally unsupported. Direct routes and host localhost connections retain
+kernel closure semantics.
 
 DNS supports connected and unconnected UDP, scatter/gather and batched messages,
 peek/truncation, timeouts, and kernel poll/epoll readiness. Blocking DNS receives
@@ -183,19 +202,12 @@ for protocol handshakes, connection races, and cancellation. Kernel-backed unit
 tests are marked ignored and run separately.
 
 The single `linux` integration target groups essential behavior into
-`capabilities`, `network`, `resolver`, `outbound`, and `lifecycle` scenarios.
-Shared helpers live in `tests/linux/support.rs` and `tests/fixtures/`.
+`capabilities`, `network`, `resolver`, `direct`, `outbound`, and `lifecycle`
+scenarios. Shared helpers live in `tests/linux/support.rs` and `tests/fixtures/`.
 Integration tests cover proxy and DNS operation, static programs, descriptor
 identity, peer addresses, urgent-data rejection, backpressure and EOF, startup
 failures, and command-tree cleanup. These tests require the permissions above,
 Python 3, a C compiler, and static libc development files. They use local proxy
 fixtures and need no public Internet connection or namespace creation.
-
-## Origin and license
-
-Based on the local **nsproxy-rs** implementation, reusing its proxy protocols,
-routing, fake DNS, process reaper, and parts of its seccomp host
-forwarding support. nsproxy-rs was inspired by
-[nsproxy by NaLan ZeYu](https://github.com/nlzy/nsproxy).
 
 GPL-3.0-only; see [LICENSE](LICENSE).

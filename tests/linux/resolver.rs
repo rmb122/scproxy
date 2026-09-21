@@ -169,7 +169,7 @@ fn static_binary_dns_abi_and_readiness() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let output = scproxy("direct").arg(&binary).output().unwrap();
+    let output = scproxy("http://127.0.0.1:1").arg(&binary).output().unwrap();
     assert!(
         output.status.success(),
         "{}",

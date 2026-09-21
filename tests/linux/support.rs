@@ -7,6 +7,7 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
 pub(super) const SOCKET_API: &str = include_str!("../fixtures/socket_api.py");
+pub(super) const DNS_API: &str = include_str!("../fixtures/dns_api.py");
 
 pub(super) fn scproxy(proxy: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_scproxy"));

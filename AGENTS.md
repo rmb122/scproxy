@@ -16,7 +16,7 @@ Outbound TCP relays terminate the entire forwarding connection after either dire
 
 - Outbound forwarding (`src/broker/relay.rs`): EOF from the application or upstream triggers the existing `close_after_drain` logic. Preserve its current conditions: `to_application` and `to_host` are empty, and the application-facing relay socket's `TIOCOUTQ` and `FIONREAD` queues are empty. Once these conditions are met, drop both streams without waiting for future responses from the other direction. Do not expand these conditions to require draining the upstream socket's unread receive queue after application EOF.
 - Implementation terminology (`src/broker/engine.rs`, `src/broker/tcp.rs`): This project uses native TCP streams rather than smoltcp sockets. Dropping both streams after the drain conditions closes the forwarding connection. Tokio `JoinHandle::abort()` cancels a task; it is not the smoltcp socket `abort()` operation mentioned in the reference project's guidelines. Review task cancellation separately from the relay's EOF handling.
-- Native host networking: Host listeners and loopback TCP connections use native kernel behavior. This project has no published-port forwarding path; do not add interception of native half-close behavior to enforce the relay policy on those connections.
+- Native host networking: Host listeners, loopback TCP connections, and direct TCP routes use native kernel behavior, including half-close. Direct routes return real DNS addresses and let the application's original socket connect in the kernel. This project has no published-port forwarding path; do not add interception of native half-close behavior to enforce the relay policy on native connections.
 
 Code changes, refactors, and reviews must respect this policy:
 

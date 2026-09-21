@@ -5,6 +5,7 @@ use super::{
     seccomp::Notification,
     sockets,
 };
+use crate::proxy::ProxyConfig;
 use std::io;
 use std::net::SocketAddrV4;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -70,15 +71,23 @@ impl Broker {
         if target.ip().is_loopback() && !dns::is_dns(target) {
             return Ok(Reply::Continue);
         }
+        let proxy_target = self.dns.target(target);
+        let route = self.config.proxy_for(&proxy_target).clone();
+        if !dns::is_dns(target)
+            && (self.dns.is_direct(*target.ip()) || route == ProxyConfig::Direct)
+        {
+            // DNS-selected direct addresses keep that decision even when the
+            // default or an IP rule selects a proxy. The kernel owns connect,
+            // readiness, socket options and closure on the original socket.
+            return Ok(Reply::Continue);
+        }
         let permit = self
             .pending
             .clone()
             .try_acquire_owned()
             .map_err(|_| memory::error(libc::EAGAIN))?;
         let internal = self.tcp_ingress.address;
-        let proxy_target = self.dns.target(target);
-        let route = self.config.proxy_for(&proxy_target).clone();
-        let dns_mapping = dns::is_dns(target).then(|| self.dns.mapping.clone());
+        let dns_resolver = dns::is_dns(target).then(|| self.dns.resolver.clone());
         self.valid(notification)?;
         self.peers.lock().unwrap().insert(
             cookie,
@@ -110,12 +119,12 @@ impl Broker {
             peer.created = Instant::now();
         }
         self.relays.lock().unwrap().spawn(async move {
-            if let Some(mapping) = dns_mapping {
+            if let Some(resolver) = dns_resolver {
                 let accepted =
                     tokio::time::timeout(Duration::from_secs(32), registration.accept()).await;
                 drop(permit);
                 if let Ok(Ok(app)) = accepted
-                    && let Err(error) = dns::serve_tcp(app, mapping).await
+                    && let Err(error) = dns::serve_tcp(app, resolver).await
                 {
                     tracing::debug!(%error, "TCP DNS closed");
                 }

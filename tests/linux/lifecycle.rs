@@ -227,7 +227,7 @@ fn termination_cancels_connect_on_a_non_loopback_device() {
             (fields.next()? == "00000000" && device != "lo").then_some(device)
         })
         .expect("test requires a non-loopback default route");
-    let mut command = scproxy("direct");
+    let mut command = scproxy("http://127.0.0.1:1");
     command.env("SCPROXY_TEST_DEVICE", device);
     let mut managed = ManagedChild::spawn_with_command(
         command,

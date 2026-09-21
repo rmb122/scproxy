@@ -59,7 +59,7 @@ fn missing_or_denied_capabilities_fail_before_command_exec() {
 #[test]
 #[ignore = "requires Linux seccomp, pidfd_getfd, kcmp, and Python 3"]
 fn legacy_pidfd_access_handles_worker_threads() {
-    let mut command = scproxy("direct");
+    let mut command = scproxy("http://127.0.0.1:1");
     command.args([
         "python3",
         "-c",
@@ -83,7 +83,7 @@ t=threading.Thread(target=work);t.start();t.join();assert not errors,errors
 #[test]
 #[ignore = "requires Linux seccomp ADDFD_SEND, pidfd_getfd, and Python 3"]
 fn proxy_and_dns_work_with_all_namespace_creation_disabled() {
-    let mut command = scproxy("direct");
+    let mut command = scproxy("http://127.0.0.1:1");
     command.args(["python3", "-c", r#"
 import json,os,socket
 for name,value in json.loads(os.environ['SCPROXY_ORIGINAL_NS']).items():assert os.readlink('/proc/self/ns/'+name)==value

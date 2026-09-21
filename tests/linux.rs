@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 #[path = "linux/capabilities.rs"]
 mod capabilities;
+#[path = "linux/direct.rs"]
+mod direct;
 #[path = "linux/lifecycle.rs"]
 mod lifecycle;
 #[path = "linux/network.rs"]

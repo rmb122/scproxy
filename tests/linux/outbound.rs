@@ -298,6 +298,7 @@ fn direct_domain_route_uses_the_supervisors_resolver() {
 import os,socket,struct
 q=b'\x12\x34\x01\x00\x00\x01'+b'\x00'*6+b'\x09localhost\x00\x00\x01\x00\x01'
 d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); d.settimeout(3); d.sendto(q,('172.23.255.254',53)); ip=socket.inet_ntoa(d.recv(512)[-4:])
+assert ip=='127.0.0.1',ip
 s=socket.create_connection((ip,int(os.environ['PORT'])),timeout=3)
 data=b''
 while len(data)<6: data+=s.recv(6-len(data))

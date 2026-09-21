@@ -1,4 +1,3 @@
-pub mod direct;
 pub mod http;
 pub mod socks5;
 
@@ -97,7 +96,7 @@ impl ProxyConfig {
 
     async fn connect_inner(&self, target: &ProxyTarget) -> Result<ProxyStream> {
         match self {
-            Self::Direct => direct::DirectConnector.connect(target).await,
+            Self::Direct => bail!("direct connections must use the application's socket"),
             Self::Socks5 { addr, auth } => {
                 socks5::Socks5Connector::new(addr.clone(), auth.clone())
                     .connect(target)

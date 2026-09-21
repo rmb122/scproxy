@@ -30,7 +30,7 @@ const RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(32);
 pub(super) struct Broker {
     pub listener: Arc<OwnedFd>,
     pub access: SocketAccess,
-    pub config: crate::config::Config,
+    pub config: Arc<crate::config::Config>,
     pub dns: Dns,
     pub resolver_files: ResolverFiles,
     pub tcp_ingress: Arc<Ingress>,
@@ -45,11 +45,12 @@ impl Broker {
         access: SocketAccess,
         config: crate::config::Config,
     ) -> io::Result<Arc<Self>> {
+        let config = Arc::new(config);
         Ok(Arc::new(Self {
             listener,
             access,
-            config,
-            dns: Dns::new()?,
+            config: config.clone(),
+            dns: Dns::new(config)?,
             resolver_files: ResolverFiles::new()?,
             tcp_ingress: Ingress::new()?,
             peers: Mutex::new(HashMap::new()),
