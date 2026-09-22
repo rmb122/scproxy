@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -118,6 +118,39 @@ pub(super) fn accept_with_timeout(listener: TcpListener) -> TcpStream {
             Err(error) => panic!("accept: {error}"),
         }
     }
+}
+
+pub(super) fn tunnel(listener: TcpListener, expected: &str) -> TcpStream {
+    let mut stream = accept_with_timeout(listener);
+    let mut reader = BufReader::new(&mut stream);
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    assert_eq!(first, format!("CONNECT {expected} HTTP/1.1\r\n"));
+    loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        if line == "\r\n" {
+            break;
+        }
+    }
+    stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+    stream
+}
+
+pub(super) fn compile_c_fixture(source: &str, output: &std::path::Path, flags: &[&str]) {
+    let compiled = Command::new("cc")
+        .args(["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(source)
+        .args(flags)
+        .arg("-o")
+        .arg(output)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
 }
 
 pub(super) struct TestDir(pub(super) std::path::PathBuf);

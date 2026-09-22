@@ -149,26 +149,7 @@ with tempfile.TemporaryDirectory() as directory:
 fn static_binary_dns_abi_and_readiness() {
     let temp = TestDir::new("dns");
     let binary = temp.0.join("dns");
-    let compiled = std::process::Command::new("cc")
-        .args([
-            "-std=gnu11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-static",
-            "-pthread",
-            "tests/fixtures/dns.c",
-            "-o",
-        ])
-        .arg(&binary)
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+    compile_c_fixture("tests/fixtures/dns.c", &binary, &["-static", "-pthread"]);
     let output = scproxy("http://127.0.0.1:1").arg(&binary).output().unwrap();
     assert!(
         output.status.success(),

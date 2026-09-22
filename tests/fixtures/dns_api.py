@@ -16,9 +16,8 @@ def dns_exact(stream, count):
     return data
 
 
-def dns_lookup(name, tcp=False, kind=1):
+def dns_lookup(name, tcp=False, kind=1, server=('203.0.113.53', 53)):
     query = dns_query(name, kind)
-    server = ('203.0.113.53', 53)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM) as client:
         client.settimeout(3)
         if tcp:

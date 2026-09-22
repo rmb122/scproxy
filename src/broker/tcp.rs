@@ -5,7 +5,7 @@ use super::{
     seccomp::Notification,
     sockets,
 };
-use crate::proxy::ProxyConfig;
+use crate::proxy::{ProxyConfig, ProxyTarget};
 use std::io;
 use std::net::SocketAddrV4;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -68,17 +68,22 @@ impl Broker {
             return Ok(Reply::Continue);
         }
         self.peers.lock().unwrap().remove(&cookie);
-        if target.ip().is_loopback() && !dns::is_dns(target) {
-            return Ok(Reply::Continue);
-        }
-        let proxy_target = self.dns.target(target);
+        let is_dns = dns::is_dns(target);
+        // DNS interception precedes route selection, even for an otherwise
+        // unknown FakeIP. Its original resolver address is only source metadata.
+        let proxy_target = if is_dns {
+            ProxyTarget::Ip {
+                addr: (*target.ip()).into(),
+                port: target.port(),
+            }
+        } else {
+            self.dns.target(target)?
+        };
         let route = self.config.proxy_for(&proxy_target).clone();
-        if !dns::is_dns(target)
-            && (self.dns.is_direct(*target.ip()) || route == ProxyConfig::Direct)
+        if !is_dns && matches!(proxy_target, ProxyTarget::Ip { .. }) && route == ProxyConfig::Direct
         {
-            // DNS-selected direct addresses keep that decision even when the
-            // default or an IP rule selects a proxy. The kernel owns connect,
-            // readiness, socket options and closure on the original socket.
+            // Only numeric direct destinations use native connect. Domain
+            // targets need the relay to resolve without blocking the caller.
             return Ok(Reply::Continue);
         }
         let permit = self
@@ -87,7 +92,8 @@ impl Broker {
             .try_acquire_owned()
             .map_err(|_| memory::error(libc::EAGAIN))?;
         let internal = self.tcp_ingress.address;
-        let dns_resolver = dns::is_dns(target).then(|| self.dns.resolver.clone());
+        let dns_resolver = is_dns.then(|| self.dns.resolver.clone());
+        let direct = self.direct.clone();
         self.valid(notification)?;
         self.peers.lock().unwrap().insert(
             cookie,
@@ -133,7 +139,12 @@ impl Broker {
             let connection = tokio::time::timeout(Duration::from_secs(32), async {
                 let app = registration.accept().await?;
                 tracing::debug!(target = %proxy_target, %route, "outbound connection");
-                let upstream = route.connect(&proxy_target).await?;
+                let upstream = match (&route, &proxy_target) {
+                    (ProxyConfig::Direct, ProxyTarget::Domain { host, port }) => {
+                        direct.connect(host, *port).await?
+                    }
+                    _ => route.connect(&proxy_target).await?,
+                };
                 Ok::<_, anyhow::Error>((app, upstream))
             })
             .await;

@@ -158,37 +158,14 @@ pub fn parse_query(data: &[u8]) -> Option<(u16, String, u16)> {
 /// The question section is rebuilt from `domain`; the answer uses the
 /// standard `0xC00C` name-compression pointer back to offset 12.
 pub fn build_a_response(id: u16, domain: &str, ip: Ipv4Addr) -> Vec<u8> {
-    build_a_records(id, domain, &[ip], 300, 512)
-}
-
-/// Encode as many complete A records as fit, setting TC for a TCP retry.
-pub fn build_a_records(
-    id: u16,
-    domain: &str,
-    addresses: &[Ipv4Addr],
-    ttl: u32,
-    limit: usize,
-) -> Vec<u8> {
     let mut pkt = build_empty_response(id, domain, 1);
-    let count = addresses.len().min(limit.saturating_sub(pkt.len()) / 16);
-    pkt[6..8].copy_from_slice(&(count as u16).to_be_bytes());
-    if count < addresses.len() {
-        pkt[2] |= 2; // TC
-    }
-    for ip in &addresses[..count] {
-        pkt.extend_from_slice(&0xC00Cu16.to_be_bytes()); // NAME: pointer to question
-        pkt.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
-        pkt.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
-        pkt.extend_from_slice(&ttl.to_be_bytes());
-        pkt.extend_from_slice(&4u16.to_be_bytes());
-        pkt.extend_from_slice(&ip.octets());
-    }
-    pkt
-}
-
-pub fn build_error_response(id: u16, domain: &str, qtype: u16, rcode: u8) -> Vec<u8> {
-    let mut pkt = build_empty_response(id, domain, qtype);
-    pkt[3] |= rcode & 0xf;
+    pkt[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT
+    pkt.extend_from_slice(&0xC00Cu16.to_be_bytes()); // NAME: pointer to question
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // TYPE A
+    pkt.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+    pkt.extend_from_slice(&300u32.to_be_bytes()); // TTL
+    pkt.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH
+    pkt.extend_from_slice(&ip.octets());
     pkt
 }
 
@@ -306,32 +283,6 @@ mod tests {
         let mut response = request;
         response[2] |= 0x80;
         assert!(parse_query(&response).is_none());
-    }
-
-    #[test]
-    fn multiple_a_records_truncate_at_record_boundaries_for_udp() {
-        let addresses: Vec<_> = (1..=40).map(|n| Ipv4Addr::new(192, 0, 2, n)).collect();
-        let udp = build_a_records(42, "example.com", &addresses, 60, 512);
-        let tcp = build_a_records(42, "example.com", &addresses, 60, 65535);
-        let question_length = build_empty_response(42, "example.com", 1).len();
-        assert_eq!(&udp[..2], &42u16.to_be_bytes());
-        assert!(udp.len() <= 512);
-        assert_ne!(udp[2] & 2, 0);
-        assert_eq!(tcp[2] & 2, 0);
-        for packet in [&udp, &tcp] {
-            let count = u16::from_be_bytes(packet[6..8].try_into().unwrap()) as usize;
-            assert_eq!(packet.len(), question_length + count * 16);
-            for (record, address) in packet[question_length..]
-                .as_chunks::<16>()
-                .0
-                .iter()
-                .zip(&addresses)
-            {
-                assert_eq!(&record[6..10], &60u32.to_be_bytes());
-                assert_eq!(&record[12..], &address.octets());
-            }
-        }
-        assert_eq!(u16::from_be_bytes(tcp[6..8].try_into().unwrap()), 40);
     }
 
     #[test]

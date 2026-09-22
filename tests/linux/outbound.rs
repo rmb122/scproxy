@@ -64,23 +64,6 @@ s.sendall(b'ACK')
     server.join().unwrap();
 }
 
-fn tunnel(listener: TcpListener, expected: &str) -> std::net::TcpStream {
-    let mut stream = accept_with_timeout(listener);
-    let mut reader = BufReader::new(&mut stream);
-    let mut first = String::new();
-    reader.read_line(&mut first).unwrap();
-    assert_eq!(first, format!("CONNECT {expected} HTTP/1.1\r\n"));
-    loop {
-        let mut line = String::new();
-        assert!(reader.read_line(&mut line).unwrap() > 0);
-        if line == "\r\n" {
-            break;
-        }
-    }
-    stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
-    stream
-}
-
 #[test]
 #[ignore = "requires Linux seccomp and Python 3"]
 fn peer_name_socket_option_preserves_target_and_buffer_semantics() {
@@ -298,7 +281,7 @@ fn direct_domain_route_uses_the_supervisors_resolver() {
 import os,socket,struct
 q=b'\x12\x34\x01\x00\x00\x01'+b'\x00'*6+b'\x09localhost\x00\x00\x01\x00\x01'
 d=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); d.settimeout(3); d.sendto(q,('172.23.255.254',53)); ip=socket.inet_ntoa(d.recv(512)[-4:])
-assert ip=='127.0.0.1',ip
+assert ip.startswith(('198.18.','198.19.')),ip
 s=socket.create_connection((ip,int(os.environ['PORT'])),timeout=3)
 data=b''
 while len(data)<6: data+=s.recv(6-len(data))

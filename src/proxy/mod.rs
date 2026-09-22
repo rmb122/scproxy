@@ -1,3 +1,4 @@
+pub mod direct;
 pub mod http;
 pub mod socks5;
 
@@ -96,7 +97,7 @@ impl ProxyConfig {
 
     async fn connect_inner(&self, target: &ProxyTarget) -> Result<ProxyStream> {
         match self {
-            Self::Direct => bail!("direct connections must use the application's socket"),
+            Self::Direct => bail!("domain direct routes require the shared direct connector"),
             Self::Socks5 { addr, auth } => {
                 socks5::Socks5Connector::new(addr.clone(), auth.clone())
                     .connect(target)
@@ -124,7 +125,7 @@ impl std::fmt::Display for ProxyConfig {
 /// Target for proxy connection.
 #[derive(Debug, Clone)]
 pub enum ProxyTarget {
-    /// Domain name — sent to proxy for remote DNS resolution (anti-leak).
+    /// Domain recovered from FakeIP, resolved by the selected route.
     Domain { host: String, port: u16 },
     /// IP address.
     Ip { addr: IpAddr, port: u16 },

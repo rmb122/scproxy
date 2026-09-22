@@ -1,10 +1,7 @@
-//! Route-aware DNS over UDP and TCP.
-mod lookup;
-mod resolver;
-
+//! Synthetic DNS over UDP and TCP; host resolution happens only on connection.
 use crate::config::net::{DNS_ADDR, DNS_PORT};
-use crate::{config::Config, proxy::ProxyTarget};
-pub(super) use resolver::Resolver;
+use crate::fake_dns::{self, FakeDns};
+use crate::proxy::ProxyTarget;
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -22,6 +19,42 @@ pub(super) fn is_dns(address: SocketAddrV4) -> bool {
 }
 
 #[derive(Default)]
+pub(super) struct Resolver {
+    mapping: Mutex<FakeDns>,
+}
+
+impl Resolver {
+    fn target(&self, address: SocketAddrV4) -> io::Result<ProxyTarget> {
+        let mapping = self.mapping.lock().unwrap();
+        if mapping.is_fake_ip(*address.ip()) {
+            let domain = mapping
+                .lookup(*address.ip())
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::ENETUNREACH))?;
+            Ok(ProxyTarget::Domain {
+                host: domain.to_owned(),
+                port: address.port(),
+            })
+        } else {
+            Ok(ProxyTarget::Ip {
+                addr: (*address.ip()).into(),
+                port: address.port(),
+            })
+        }
+    }
+
+    fn answer(&self, query: &[u8]) -> Option<Vec<u8>> {
+        let (id, domain, kind) = fake_dns::parse_query(query)?;
+        Some(if kind == 1 {
+            let ip = self.mapping.lock().unwrap().resolve(&domain);
+            tracing::debug!(%domain, %ip, "fake DNS");
+            fake_dns::build_a_response(id, &domain, ip)
+        } else {
+            fake_dns::build_empty_response(id, &domain, kind)
+        })
+    }
+}
+
+#[derive(Default)]
 struct Servers {
     forward: HashMap<SocketAddrV4, SocketAddrV4>,
     reverse: HashMap<SocketAddrV4, SocketAddrV4>,
@@ -33,9 +66,9 @@ pub(super) struct Dns {
     tasks: Mutex<JoinSet<io::Result<()>>>,
 }
 impl Dns {
-    pub fn new(config: Arc<Config>) -> io::Result<Self> {
+    pub fn new() -> io::Result<Self> {
         let dns = Self {
-            resolver: Arc::new(Resolver::new(config)),
+            resolver: Arc::new(Resolver::default()),
             servers: Mutex::new(Servers::default()),
             tasks: Mutex::new(JoinSet::new()),
         };
@@ -77,12 +110,8 @@ impl Dns {
         self.servers.lock().unwrap().reverse.get(&local).copied()
     }
 
-    pub fn target(&self, address: SocketAddrV4) -> ProxyTarget {
+    pub fn target(&self, address: SocketAddrV4) -> io::Result<ProxyTarget> {
         self.resolver.target(address)
-    }
-
-    pub fn is_direct(&self, address: Ipv4Addr) -> bool {
-        self.resolver.is_direct(address)
     }
 
     pub async fn run(&self) -> io::Result<()> {
@@ -95,18 +124,9 @@ impl Dns {
 }
 
 async fn serve_udp(socket: UdpSocket, resolver: Arc<Resolver>) -> io::Result<()> {
-    let socket = Arc::new(socket);
-    let mut pending = JoinSet::new();
     let mut buffer = vec![0; 65536];
     loop {
-        let received = tokio::select! {
-            result = pending.join_next(), if !pending.is_empty() => {
-                if let Some(Err(error)) = result { return Err(io::Error::other(error)); }
-                continue;
-            },
-            result = socket.recv_from(&mut buffer), if pending.len() < 128 => result,
-        };
-        let (length, source) = match received {
+        let (length, source) = match socket.recv_from(&mut buffer).await {
             Ok(packet) => packet,
             Err(error) if matches!(error.raw_os_error(), Some(libc::ENOMEM | libc::ENOBUFS)) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -114,16 +134,11 @@ async fn serve_udp(socket: UdpSocket, resolver: Arc<Resolver>) -> io::Result<()>
             }
             Err(error) => return Err(error),
         };
-        let query = buffer[..length].to_vec();
-        let resolver = resolver.clone();
-        let socket = socket.clone();
-        pending.spawn(async move {
-            if let Some(response) = resolver.answer(&query, 512).await
-                && let Err(error) = socket.send_to(&response, source).await
-            {
-                tracing::debug!(%error, "DNS reply discarded");
-            }
-        });
+        if let Some(response) = resolver.answer(&buffer[..length])
+            && let Err(error) = socket.send_to(&response, source).await
+        {
+            tracing::debug!(%error, "DNS reply discarded");
+        }
     }
 }
 
@@ -140,12 +155,9 @@ pub(super) async fn serve_tcp(mut socket: TcpStream, resolver: Arc<Resolver>) ->
             }
             let mut query = vec![0; u16::from_be_bytes(prefix) as usize];
             socket.read_exact(&mut query).await?;
-            let response = resolver
-                .answer(&query, u16::MAX as usize)
-                .await
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid TCP DNS query")
-                })?;
+            let response = resolver.answer(&query).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid TCP DNS query")
+            })?;
             let length = u16::try_from(response.len()).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "TCP DNS response is too large")
             })?;
@@ -159,5 +171,30 @@ pub(super) async fn serve_tcp(mut socket: TcpStream, resolver: Arc<Resolver>) ->
         {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targets_recover_domains_and_reject_unknown_fake_addresses() {
+        let resolver = Resolver::default();
+        let fake = "198.18.0.1:443".parse().unwrap();
+        assert_eq!(
+            resolver.target(fake).unwrap_err().raw_os_error(),
+            Some(libc::ENETUNREACH)
+        );
+        assert!(matches!(
+            resolver.target("203.0.113.1:443".parse().unwrap()).unwrap(),
+            ProxyTarget::Ip { .. }
+        ));
+        let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07missing\x07invalid\x00\x00\x01\x00\x01";
+        let answer = resolver.answer(query).unwrap();
+        assert_eq!(&answer[answer.len() - 4..], &[198, 18, 0, 1]);
+        assert!(
+            matches!(resolver.target(fake).unwrap(), ProxyTarget::Domain {host, port:443} if host == "missing.invalid")
+        );
     }
 }

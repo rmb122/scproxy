@@ -11,6 +11,7 @@ use super::{
     tcp::Peer,
     tcp_ingress::Ingress,
 };
+use crate::proxy::direct::DirectConnector;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -30,7 +31,8 @@ const RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(32);
 pub(super) struct Broker {
     pub listener: Arc<OwnedFd>,
     pub access: SocketAccess,
-    pub config: Arc<crate::config::Config>,
+    pub config: crate::config::Config,
+    pub direct: DirectConnector,
     pub dns: Dns,
     pub resolver_files: ResolverFiles,
     pub tcp_ingress: Arc<Ingress>,
@@ -45,12 +47,12 @@ impl Broker {
         access: SocketAccess,
         config: crate::config::Config,
     ) -> io::Result<Arc<Self>> {
-        let config = Arc::new(config);
         Ok(Arc::new(Self {
             listener,
             access,
-            config: config.clone(),
-            dns: Dns::new(config)?,
+            config,
+            direct: DirectConnector::default(),
+            dns: Dns::new()?,
             resolver_files: ResolverFiles::new()?,
             tcp_ingress: Ingress::new()?,
             peers: Mutex::new(HashMap::new()),
