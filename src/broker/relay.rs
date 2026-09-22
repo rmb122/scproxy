@@ -59,6 +59,11 @@ pub(super) async fn run(
             }
         }
         progress |= flush(&host.inner, &mut to_host)?;
+        if close_after_drain && let Some(error) = application.take_error()? {
+            // EOF can disable further reads. Still observe resets: TIOCOUTQ
+            // may retain an unacknowledged sequence count after TCP_CLOSE.
+            return Err(error);
+        }
         if close_after_drain
             && to_application.is_empty()
             && to_host.is_empty()
@@ -93,5 +98,96 @@ fn flush(stream: &TcpStream, pending: &mut Vec<u8>) -> io::Result<bool> {
         }
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{AsFd, OwnedFd};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpSocket};
+    use tokio::task::JoinHandle;
+    use tokio::time::{sleep, timeout};
+
+    async fn backpressured_drain() -> (TcpStream, OwnedFd, JoinHandle<io::Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let application = socket
+            .connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (relay_application, _) = listener.accept().await.unwrap();
+        let monitor = relay_application.as_fd().try_clone_to_owned().unwrap();
+        let host = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let host_monitor = host.as_fd().try_clone_to_owned().unwrap();
+        let (mut upstream, _) = listener.accept().await.unwrap();
+        let relay = tokio::spawn(run(
+            relay_application,
+            crate::proxy::ProxyStream::new(host, Vec::new()),
+        ));
+        upstream.write_all(&vec![0x5a; BUFFER * 2]).await.unwrap();
+        upstream.shutdown().await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                // The upstream FIN and all payload must reach the relay before
+                // the application closes, leaving only its send queue blocked.
+                if sockets::state(host_monitor.as_raw_fd()).unwrap() == 8
+                    && sockets::queue_len(host_monitor.as_raw_fd(), libc::FIONREAD as _).unwrap()
+                        == 0
+                    && sockets::queue_len(monitor.as_raw_fd(), libc::TIOCOUTQ as _).unwrap() > 0
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("relay must consume upstream payload and FIN");
+        sleep(Duration::from_millis(20)).await;
+        assert!(
+            !relay.is_finished(),
+            "unacknowledged data must keep the relay alive"
+        );
+        (application, monitor, relay)
+    }
+
+    #[tokio::test]
+    async fn reset_during_drain_does_not_wait_for_stale_output_queue() {
+        let (application, monitor, relay) = backpressured_drain().await;
+        assert!(sockets::queue_len(application.as_raw_fd(), libc::FIONREAD as _).unwrap() > 0);
+        drop(application);
+        let error = timeout(Duration::from_secs(2), relay)
+            .await
+            .expect("reset must finish the relay without the global drain deadline")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(sockets::state(monitor.as_raw_fd()).unwrap(), 7);
+        assert!(sockets::queue_len(monitor.as_raw_fd(), libc::TIOCOUTQ as _).unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn healthy_drain_still_delivers_all_backpressured_data() {
+        let (mut application, monitor, relay) = backpressured_drain().await;
+        // A duplicate would otherwise keep the relay endpoint open after run.
+        drop(monitor);
+        let mut received = vec![0; BUFFER * 2];
+        timeout(
+            Duration::from_secs(2),
+            application.read_exact(&mut received),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(received, vec![0x5a; BUFFER * 2]);
+        timeout(Duration::from_secs(2), relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

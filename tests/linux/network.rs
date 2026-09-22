@@ -226,6 +226,10 @@ s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 for destination in [('127.0.0.1',int(os.environ['UDP_PORT'])),('8.8.8.8',123)]:
     try: s.sendto(b'no leak',destination); raise AssertionError('UDP allowed')
     except OSError as e: assert e.errno==errno.ENETUNREACH,e
+    try: s.connect(destination); raise AssertionError('UDP connect allowed')
+    except OSError as e: assert e.errno==errno.ENETUNREACH,e
+    try: s.send(b'no leak'); raise AssertionError('unconnected UDP send allowed')
+    except OSError as e: assert e.errno==errno.EDESTADDRREQ,e
 s=socket.socket()
 try: s.sendto(b'no leak',socket.MSG_FASTOPEN,('127.0.0.1',int(os.environ['TCP_PORT']))); raise AssertionError('Fast Open allowed')
 except OSError as e: assert e.errno==errno.EOPNOTSUPP,e

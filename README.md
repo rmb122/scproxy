@@ -150,9 +150,13 @@ drained. Independent half-close support and waiting for later responses after ha
 intentionally unsupported, including for direct domains. Numeric direct routes
 and host listeners retain kernel closure semantics.
 
+Address-free `send`/`recv` calls without urgent-data or Fast Open flags execute
+directly in the kernel. Calls carrying socket addresses or message headers still
+notify the broker for protocol checks and address translation.
+
 DNS supports connected and unconnected UDP, scatter/gather and batched messages,
-peek/truncation, timeouts, and kernel poll/epoll readiness. Blocking DNS receives
-are asynchronous in the broker and do not prevent another thread from sending.
+peek/truncation, timeouts, and kernel poll/epoll readiness. DNS receives handled
+by the broker are asynchronous and do not prevent another thread from sending.
 Pending requests and upstream handshakes are bounded; overload returns an error
 for the affected request. Descriptor exhaustion can recover without restarting
 the command tree.

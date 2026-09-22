@@ -100,6 +100,9 @@ assert seen==set(servers)
 for server in servers:
     s.connect(server);assert s.getpeername()==peer_name(s)==server
     s.send(query('connected.invalid'));answer,source=s.recvfrom(4096);assert source==server;check(answer,query('connected.invalid'))
+    # Address-free send/recv bypass notifications on the already redirected peer.
+    request=query('plain.invalid');s.send(request)
+    check(s.recv(4096,socket.MSG_PEEK),request);check(s.recv(4096),request)
 s.close()
 def exact(s,n):
     data=b''

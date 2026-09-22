@@ -150,6 +150,25 @@ fn filter() -> Vec<libc::sock_filter> {
         statement(RET, SECCOMP_RET_USER_NOTIF),
         statement(RET, SECCOMP_RET_ALLOW),
     ]);
+    // Connected UDP already has its DNS peer redirected by connect. Plain
+    // send/recv need no broker work, but addresses and special flags still do.
+    for (syscall, flags) in [
+        (libc::SYS_sendto, libc::MSG_OOB | libc::MSG_FASTOPEN),
+        (libc::SYS_recvfrom, libc::MSG_OOB),
+    ] {
+        filter.extend([
+            jump(JEQ, syscall as u32, 0, 8),
+            statement(LOAD, (offset_of!(Data, args) + 3 * 8) as u32),
+            jump(JSET, flags as u32, 5, 0),
+            // Test both halves of the native 64-bit address pointer.
+            statement(LOAD, (offset_of!(Data, args) + 4 * 8) as u32),
+            jump(JEQ, 0, 0, 3),
+            statement(LOAD, (offset_of!(Data, args) + 4 * 8 + 4) as u32),
+            jump(JEQ, 0, 0, 1),
+            statement(RET, SECCOMP_RET_ALLOW),
+            statement(RET, SECCOMP_RET_USER_NOTIF),
+        ]);
+    }
     for syscall in [
         #[cfg(target_arch = "x86_64")]
         libc::SYS_open,
@@ -158,10 +177,8 @@ fn filter() -> Vec<libc::sock_filter> {
         libc::SYS_socket,
         libc::SYS_connect,
         libc::SYS_getpeername,
-        libc::SYS_sendto,
         libc::SYS_sendmsg,
         libc::SYS_sendmmsg,
-        libc::SYS_recvfrom,
         libc::SYS_recvmsg,
         libc::SYS_recvmmsg,
     ] {
@@ -312,6 +329,56 @@ mod tests {
                 _ => panic!("unexpected filter instruction"),
             }
             pc += 1;
+        }
+    }
+
+    #[test]
+    fn address_free_io_skips_notifications_but_preserves_special_cases() {
+        for syscall in [libc::SYS_sendto, libc::SYS_recvfrom] {
+            for flags in [0, libc::MSG_DONTWAIT, libc::MSG_NOSIGNAL, libc::MSG_PEEK] {
+                assert_eq!(
+                    evaluate_with_args(
+                        NATIVE_ARCH,
+                        syscall as i32,
+                        [3, 0x1000, 4096, flags as u64, 0, 0],
+                    ),
+                    SECCOMP_RET_ALLOW,
+                );
+            }
+            for address in [1, 0x1000, 1 << 32, u64::MAX] {
+                assert_eq!(
+                    evaluate_with_args(NATIVE_ARCH, syscall as i32, [3, 0, 0, 0, address, 16]),
+                    SECCOMP_RET_USER_NOTIF,
+                );
+            }
+            assert_eq!(
+                evaluate_with_args(
+                    NATIVE_ARCH,
+                    syscall as i32,
+                    [3, 0, 0, (libc::MSG_OOB | libc::MSG_DONTWAIT) as u64, 0, 0],
+                ),
+                SECCOMP_RET_USER_NOTIF,
+            );
+        }
+        assert_eq!(
+            evaluate_with_args(
+                NATIVE_ARCH,
+                libc::SYS_sendto as i32,
+                [3, 0, 0, libc::MSG_FASTOPEN as u64, 0, 0],
+            ),
+            SECCOMP_RET_USER_NOTIF,
+        );
+        for syscall in [
+            libc::SYS_connect,
+            libc::SYS_sendmsg,
+            libc::SYS_sendmmsg,
+            libc::SYS_recvmsg,
+            libc::SYS_recvmmsg,
+        ] {
+            assert_eq!(
+                evaluate(NATIVE_ARCH, syscall as i32),
+                SECCOMP_RET_USER_NOTIF,
+            );
         }
     }
 
