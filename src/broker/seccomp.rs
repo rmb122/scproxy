@@ -189,6 +189,41 @@ fn filter() -> Vec<libc::sock_filter> {
     filter
 }
 
+fn has_sys_admin() -> io::Result<bool> {
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    const CAP_SYS_ADMIN: u32 = 21;
+
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: libc::pid_t,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Capabilities {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    let mut header = Header {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0, // Query the calling thread, not its thread-group leader.
+    };
+    let mut data = [Capabilities::default(); 2];
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            &mut header as *mut Header,
+            data.as_mut_ptr(),
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(data[0].effective & (1 << CAP_SYS_ADMIN) != 0)
+}
+
 pub(super) fn install() -> io::Result<OwnedFd> {
     let mut sizes = NotificationSizes::default();
     let result = unsafe {
@@ -211,7 +246,9 @@ pub(super) fn install() -> io::Result<OwnedFd> {
             "kernel seccomp notification structures exceed supported sizes",
         ));
     }
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } < 0 {
+    // CAP_SYS_ADMIN permits installing the filter without restricting exec
+    // privilege transitions. An inherited no_new_privs flag remains set.
+    if !has_sys_admin()? && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let mut instructions = filter();

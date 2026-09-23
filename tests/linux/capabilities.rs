@@ -102,3 +102,50 @@ print('no namespaces OK')
     );
     assert_eq!(output.stdout, b"no namespaces OK\n");
 }
+
+#[test]
+#[ignore = "requires Linux user namespaces, seccomp, unset no_new_privs, Python 3, and a C compiler"]
+fn no_new_privs_depends_on_sys_admin_and_preserves_inherited_state() {
+    let directory = TestDir::new("privileges");
+    let launcher = directory.0.join("privileges");
+    compile_c_fixture("tests/fixtures/privileges.c", &launcher, &[]);
+    for (admin, inherited) in [(true, false), (false, false), (true, true), (false, true)] {
+        let output = Command::new("unshare")
+            .arg("-Ur")
+            .arg(&launcher)
+            .args([
+                if admin { "keep" } else { "drop" },
+                if inherited { "1" } else { "0" },
+            ])
+            .arg(env!("CARGO_BIN_EXE_scproxy"))
+            .args([
+                "-x",
+                "direct",
+                "python3",
+                "-c",
+                r#"
+import ctypes,os,socket,sys
+lib=ctypes.CDLL(None)
+assert os.getuid()==0
+expected_admin=int(sys.argv[1]);expected_nnp=int(sys.argv[2])
+status=dict(line.split(':',1) for line in open('/proc/self/status'))
+assert bool(int(status['CapEff'],16)&(1<<21))==bool(expected_admin)
+actual_nnp=lib.prctl(39,0,0,0,0) # PR_GET_NO_NEW_PRIVS
+assert actual_nnp==expected_nnp,(actual_nnp,expected_nnp)
+assert lib.prctl(21,0,0,0,0)==2 # PR_GET_SECCOMP
+assert socket.gethostbyname('privileges.invalid')=='198.18.0.2'
+print('privileges OK')
+"#,
+            ])
+            .arg(if admin { "1" } else { "0" })
+            .arg(if inherited || !admin { "1" } else { "0" })
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "admin={admin}, inherited={inherited}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"privileges OK\n");
+    }
+}

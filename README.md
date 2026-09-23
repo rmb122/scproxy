@@ -97,8 +97,10 @@ drain; a timeout returns an error.
   unsupported.
 - `io_uring` is disabled; applications need ordinary syscall fallback.
   TCP Fast Open and relayed TCP urgent data are unsupported.
-- `no_new_privs` prevents setuid elevation. Pre-existing or externally received
-  connections are not retroactively proxied. scproxy is not an isolation sandbox.
+- Without effective `CAP_SYS_ADMIN`, scproxy enables `no_new_privs`, preventing
+  setuid elevation. An inherited `no_new_privs` flag remains set.
+- Pre-existing or externally received connections are not retroactively proxied.
+  scproxy is not an isolation sandbox.
 
 ## Tests
 
@@ -111,5 +113,7 @@ cargo test --all-targets -- --include-ignored --test-threads=1
 The full suite includes Linux integration tests and requires the permissions
 above, Python 3, a C compiler, and static libc development files. Tests use local
 fixtures and need no public Internet connection.
+Capability tests also require `unshare`, user namespaces, and an unset
+`no_new_privs` flag in the test runner.
 
 GPL-3.0-only; see [LICENSE](LICENSE).
