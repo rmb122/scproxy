@@ -1,9 +1,9 @@
 //! One loopback listener shared by all outbound connections.
-use super::sockets;
+use super::{sockets, tcp_bind};
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -11,20 +11,13 @@ use tokio::sync::oneshot;
 
 struct Pending {
     socket: Arc<OwnedFd>,
-    source: Option<SocketAddrV4>,
     sender: Option<oneshot::Sender<TcpStream>>,
-}
-
-#[derive(Default)]
-struct Dispatch {
-    waiting: HashMap<RawFd, Pending>,
-    sources: HashMap<SocketAddrV4, RawFd>,
 }
 
 pub(super) struct Ingress {
     listener: TcpListener,
     pub address: SocketAddrV4,
-    dispatch: Mutex<Dispatch>,
+    waiting: Mutex<HashMap<u16, Vec<Pending>>>,
 }
 
 impl Ingress {
@@ -37,30 +30,33 @@ impl Ingress {
         let ingress = Arc::new(Self {
             listener: TcpListener::from_std(listener)?,
             address,
-            dispatch: Mutex::new(Dispatch::default()),
+            waiting: Mutex::new(HashMap::new()),
         });
         tracing::debug!(%address, "TCP relay listening");
         Ok(ingress)
     }
 
-    /// Hold the original socket before connect can enqueue an accepted stream.
+    /// Reserve and register the source port before connect can enqueue a stream.
     /// Entries are bounded by the broker's pending-connection semaphore.
-    pub fn register(self: &Arc<Self>, socket: OwnedFd) -> Registration {
+    pub fn register(self: &Arc<Self>, socket: OwnedFd) -> io::Result<Registration> {
+        let port = tcp_bind::prepare(socket.as_raw_fd())?;
         let socket = Arc::new(socket);
         let (sender, receiver) = oneshot::channel();
-        self.dispatch.lock().unwrap().waiting.insert(
-            socket.as_raw_fd(),
-            Pending {
+        self.waiting
+            .lock()
+            .unwrap()
+            .entry(port)
+            .or_default()
+            .push(Pending {
                 socket: socket.clone(),
-                source: None,
                 sender: Some(sender),
-            },
-        );
-        Registration {
+            });
+        Ok(Registration {
             ingress: self.clone(),
+            port,
             socket,
             receiver,
-        }
+        })
     }
 
     pub async fn run(&self) -> io::Result<()> {
@@ -96,24 +92,22 @@ impl Ingress {
 
     fn deliver(&self, stream: TcpStream, source: SocketAddrV4) {
         let sender = {
-            let mut dispatch = self.dispatch.lock().unwrap();
-            let matches = |pending: &Pending| {
-                let fd = pending.socket.as_raw_fd();
-                pending.sender.is_some()
-                    && sockets::address(fd, false).ok() == Some(source)
-                    && sockets::address(fd, true).ok() == Some(self.address)
-            };
-            // accept can win the race with connect's completion on another
-            // thread. Inspect only sockets whose source is not published yet;
-            // never retain an unrecognized incoming connection for later use.
-            let fd = dispatch.sources.get(&source).copied().or_else(|| {
-                dispatch.waiting.iter().find_map(|(&fd, pending)| {
-                    (pending.source.is_none() && matches(pending)).then_some(fd)
+            let mut waiting = self.waiting.lock().unwrap();
+            // Wildcard bindings acquire their actual source IP during connect.
+            // A port narrows the candidates; both endpoints identify the socket.
+            waiting.get_mut(&source.port()).and_then(|candidates| {
+                candidates.iter_mut().find_map(|pending| {
+                    let fd = pending.socket.as_raw_fd();
+                    if pending.sender.is_some()
+                        && sockets::address(fd, false).ok() == Some(source)
+                        && sockets::address(fd, true).ok() == Some(self.address)
+                    {
+                        pending.sender.take()
+                    } else {
+                        None
+                    }
                 })
-            });
-            fd.and_then(|fd| dispatch.waiting.get_mut(&fd))
-                .filter(|pending| matches(pending))
-                .and_then(|pending| pending.sender.take())
+            })
         };
         if let Some(sender) = sender {
             let _ = sender.send(stream);
@@ -123,27 +117,12 @@ impl Ingress {
 
 pub(super) struct Registration {
     ingress: Arc<Ingress>,
+    port: u16,
     pub socket: Arc<OwnedFd>,
     receiver: oneshot::Receiver<TcpStream>,
 }
 
 impl Registration {
-    pub fn connected(&self) -> io::Result<()> {
-        let fd = self.socket.as_raw_fd();
-        let source = sockets::address(fd, false)?;
-        let mut dispatch = self.ingress.dispatch.lock().unwrap();
-        if dispatch
-            .sources
-            .get(&source)
-            .is_some_and(|&other| other != fd)
-        {
-            return Err(io::Error::from_raw_os_error(libc::EADDRINUSE));
-        }
-        dispatch.waiting.get_mut(&fd).unwrap().source = Some(source);
-        dispatch.sources.insert(source, fd);
-        Ok(())
-    }
-
     pub async fn accept(mut self) -> io::Result<TcpStream> {
         (&mut self.receiver)
             .await
@@ -154,12 +133,12 @@ impl Registration {
 impl Drop for Registration {
     fn drop(&mut self) {
         let fd = self.socket.as_raw_fd();
-        let mut dispatch = self.ingress.dispatch.lock().unwrap();
-        if let Some(pending) = dispatch.waiting.remove(&fd)
-            && let Some(source) = pending.source
-            && dispatch.sources.get(&source) == Some(&fd)
-        {
-            dispatch.sources.remove(&source);
+        let mut waiting = self.ingress.waiting.lock().unwrap();
+        if let Some(candidates) = waiting.get_mut(&self.port) {
+            candidates.retain(|pending| pending.socket.as_raw_fd() != fd);
+            if candidates.is_empty() {
+                waiting.remove(&self.port);
+            }
         }
     }
 }
@@ -206,32 +185,28 @@ mod tests {
 
     fn bound(ip: Ipv4Addr, port: u16) -> OwnedFd {
         let socket = sockets::stream().unwrap();
-        let address = sockets::sockaddr(SocketAddrV4::new(ip, port));
-        sockets::check(unsafe {
-            libc::bind(
-                socket.as_raw_fd(),
-                (&address as *const libc::sockaddr_in).cast(),
-                std::mem::size_of_val(&address) as _,
-            )
-        })
-        .unwrap();
+        sockets::bind(socket.as_raw_fd(), SocketAddrV4::new(ip, port)).unwrap();
         socket
     }
 
     #[tokio::test]
-    async fn reversed_accepts_match_source_ip_and_port_before_publication() {
+    async fn reversed_accepts_match_registered_sockets_sharing_a_source_port() {
         let running = Running::new();
         let first = bound(Ipv4Addr::new(127, 0, 0, 2), 0);
         let port = sockets::address(first.as_raw_fd(), false).unwrap().port();
         let second = bound(Ipv4Addr::new(127, 0, 0, 3), port);
-        let first = running.ingress.register(first);
-        let second = running.ingress.register(second);
+        let first = running.ingress.register(first).unwrap();
+        let second = running.ingress.register(second).unwrap();
+        // Removing one registration must keep other candidates for that port.
+        let cancelled = running
+            .ingress
+            .register(bound(Ipv4Addr::new(127, 0, 0, 4), port))
+            .unwrap();
+        drop(cancelled);
         let first_socket = first.socket.clone();
         let second_socket = second.socket.clone();
         connect(&second_socket, running.ingress.address);
-        second.connected().unwrap();
         connect(&first_socket, running.ingress.address);
-        // Omit first.connected(): accept must find the unpublished source itself.
         let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(first.accept(), second.accept())
         })
@@ -246,6 +221,36 @@ mod tests {
         assert_eq!(&bytes, b"first");
         second.read_exact(&mut bytes).await.unwrap();
         assert_eq!(&bytes, b"other");
+        assert!(running.ingress.waiting.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_port_match_alone_cannot_claim_a_registration() {
+        let running = Running::new();
+        let socket = bound(Ipv4Addr::new(127, 0, 0, 2), 0);
+        let port = sockets::address(socket.as_raw_fd(), false).unwrap().port();
+        let registration = running.ingress.register(socket).unwrap();
+        let stranger = bound(Ipv4Addr::new(127, 0, 0, 3), port);
+        connect(&stranger, running.ingress.address);
+        let mut stranger = stream(&stranger);
+        let mut byte = [0];
+        let result = tokio::time::timeout(Duration::from_secs(3), stranger.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Ok(0))
+                || result.is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset)
+        );
+
+        let socket = registration.socket.clone();
+        connect(&socket, running.ingress.address);
+        let mut accepted = tokio::time::timeout(Duration::from_secs(3), registration.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        stream(&socket).write_all(b"!").await.unwrap();
+        accepted.read_exact(&mut byte).await.unwrap();
+        assert_eq!(byte, *b"!");
     }
 
     #[tokio::test]
@@ -258,7 +263,9 @@ mod tests {
         let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
         assert!(raw >= 0);
         use std::os::fd::FromRawFd;
-        let registration = ingress.register(unsafe { OwnedFd::from_raw_fd(raw) });
+        let registration = ingress
+            .register(unsafe { OwnedFd::from_raw_fd(raw) })
+            .unwrap();
         let socket = registration.socket.clone();
         let address = ingress.address;
         let connecting =
@@ -270,7 +277,6 @@ mod tests {
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             connecting.await.unwrap().unwrap();
-            registration.connected().unwrap();
             registration.accept().await.unwrap();
         })
         .await

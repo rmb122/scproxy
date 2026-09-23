@@ -288,10 +288,9 @@ mod tests {
     #[tokio::test]
     async fn draining_keeps_shared_ingress_accepting_registered_connections() {
         let ingress = Ingress::new().unwrap();
-        let registration = ingress.register(sockets::stream().unwrap());
+        let registration = ingress.register(sockets::stream().unwrap()).unwrap();
         let result = sockets::connect(registration.socket.as_raw_fd(), ingress.address);
         assert!(result.is_ok() || result.unwrap_err().raw_os_error() == Some(libc::EINPROGRESS));
-        registration.connected().unwrap();
         let mut relays = JoinSet::new();
         let (accepted, receiver) = tokio::sync::oneshot::channel();
         relays.spawn(async move {

@@ -437,12 +437,19 @@ import concurrent.futures, os, socket, sys
 def connect(index):
     target=('203.0.113.%d'%(index+1),4000+index)
     s=socket.socket(); s.settimeout(5)
-    if index%3==0: s.bind(('0.0.0.0',0))
-    if index%3==1:
+    if index%5==0: s.bind(('0.0.0.0',0))
+    if index%5 in (1,3,4):
         s.setsockopt(socket.IPPROTO_IP,24,1) # IP_BIND_ADDRESS_NO_PORT
-        s.bind(('127.0.0.2',0))
+        if index%5==1: s.bind(('127.0.0.2',0))
+        if index%5==3: s.bind(('0.0.0.0',0))
+    before=s.getsockname()
     s.connect(target)
     assert s.getpeername()==target
+    source=s.getsockname()
+    assert source[1]!=0
+    if before[1]: assert source[1]==before[1], (before,source)
+    assert source[0]==('127.0.0.2' if index%5==1 else '127.0.0.1'), source
+    assert s.getsockopt(socket.IPPROTO_IP,24)==int(index%5 in (1,3,4))
     data=b''
     while not data.endswith(b'\n'):
         part=s.recv(128); assert part; data+=part

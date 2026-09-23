@@ -13,6 +13,7 @@ mod relay;
 mod seccomp;
 mod sockets;
 mod tcp;
+mod tcp_bind;
 mod tcp_ingress;
 
 use anyhow::{Context, Result, bail};

@@ -113,6 +113,17 @@ pub(super) fn stream() -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+pub(super) fn bind(fd: RawFd, addr: SocketAddrV4) -> io::Result<()> {
+    let addr = sockaddr(addr);
+    check(unsafe {
+        libc::bind(
+            fd,
+            (&addr as *const libc::sockaddr_in).cast(),
+            size_of::<libc::sockaddr_in>() as _,
+        )
+    })
+}
+
 pub(super) fn connect(fd: RawFd, addr: SocketAddrV4) -> io::Result<()> {
     let addr = sockaddr(addr);
     check(unsafe {

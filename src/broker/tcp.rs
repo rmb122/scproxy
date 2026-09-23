@@ -109,7 +109,7 @@ impl Broker {
             cookie,
             committed: false,
         };
-        let registration = self.tcp_ingress.register(fd);
+        let registration = self.tcp_ingress.register(fd)?;
         let result = connect::run(registration.socket.clone(), internal, || {
             self.valid(notification)
         })
@@ -119,7 +119,6 @@ impl Broker {
         {
             return result.map(|()| Reply::Value(0));
         }
-        registration.connected()?;
         if let Some(peer) = self.peers.lock().unwrap().get_mut(&cookie) {
             peer.pending = false;
             peer.created = Instant::now();
