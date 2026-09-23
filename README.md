@@ -14,6 +14,27 @@ cargo build --release
 ./target/release/scproxy -x socks5://127.0.0.1:1080 -r cidr:10.0.0.0/8=direct ssh server
 ```
 
+## Choosing between scproxy and nsproxy-rs
+
+[nsproxy-rs](https://github.com/rmb122/nsproxy-rs) is a related tool that runs
+programs in an isolated network namespace and forwards their traffic through a
+TUN device and the smoltcp user-space TCP/IP stack. Both projects support SOCKS5
+and HTTP CONNECT proxies and work with statically linked programs.
+
+| Consideration       | scproxy                                                      | nsproxy-rs                                                       |
+| ------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- |
+| Performance         | Higher forwarding performance with native kernel TCP         | More overhead from TUN and user-space TCP/IP processing          |
+| Linux compatibility | Requires Linux 5.14+ and the required seccomp/pidfd features | Broader support for older kernels with namespaces and TUN        |
+| Isolation           | Inherits existing namespaces and uses host networking        | Stronger isolation through separate network and mount namespaces |
+
+Choose **scproxy** when performance is the priority and your system meets its
+kernel and permission requirements. Choose **nsproxy-rs** when compatibility
+with older kernels or namespace isolation matters more, or when you need file
+bind mounts and explicit TCP port publishing. nsproxy-rs requires namespace
+support and `/dev/net/tun`; its optional file bind mounts require Linux 5.2+.
+See each project's requirements and limitations to choose the best fit for your
+environment.
+
 ## Usage
 
 ```text
