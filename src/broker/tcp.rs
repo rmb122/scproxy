@@ -161,6 +161,7 @@ impl Broker {
         pending_peer.committed = true;
         result.map(|()| Reply::Value(0))
     }
+
     pub fn tcp_target(&self, fd: RawFd, socket_option: bool) -> io::Result<Option<SocketAddrV4>> {
         let cookie = sockets::cookie(fd)?;
         let peer = self.peers.lock().unwrap().get(&cookie).copied();

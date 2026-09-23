@@ -14,6 +14,7 @@ use tokio::task::JoinSet;
 pub(super) fn virtual_address() -> SocketAddrV4 {
     SocketAddrV4::new(DNS_ADDR, DNS_PORT)
 }
+
 pub(super) fn is_dns(address: SocketAddrV4) -> bool {
     address.port() == DNS_PORT
 }

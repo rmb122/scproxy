@@ -132,6 +132,7 @@ impl Service {
         control.write_all(&[1])?;
         Ok(service)
     }
+
     pub(crate) async fn wait(&mut self) -> std::io::Result<()> {
         let Some(task) = self.task.as_mut() else {
             return std::future::pending().await;
@@ -140,6 +141,7 @@ impl Service {
         self.task.take();
         result.map_err(std::io::Error::other)?
     }
+
     pub(crate) async fn stop(&mut self) {
         self.begin_shutdown(true);
         if let Some(task) = self.task.take() {

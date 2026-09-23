@@ -9,6 +9,7 @@
 5. Use Chinese only when communicating with the user, including progress updates, reports, root cause explanations, and validation results. Clearly describe what changed, why it changed, and the results of checks actually performed.
 6. Use English for code comments and Git commit messages, including both the subject and body.
 7. Use ASCII punctuation and symbols instead of Chinese or full-width punctuation and symbols, including in Chinese replies to the user.
+8. Separate adjacent Rust functions and methods with one blank line. Place the blank line before any documentation comments or attributes attached to the next function.
 
 ## TCP Closure Semantics (Explicit User Requirement)
 

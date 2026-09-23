@@ -37,6 +37,7 @@ impl Message {
             length_pointer: (receive && name != 0).then_some(length_pointer),
         })
     }
+
     pub fn header(tid: u32, pointer: u64) -> io::Result<Self> {
         let bytes = memory::read(tid, pointer, 56)?;
         let word = |offset| u64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
@@ -65,6 +66,7 @@ impl Message {
             length_pointer: None,
         })
     }
+
     pub fn capacity(&self) -> io::Result<usize> {
         self.vectors.iter().try_fold(0usize, |size, &(_, length)| {
             size.checked_add(length)
@@ -72,6 +74,7 @@ impl Message {
                 .ok_or_else(|| memory::error(libc::EINVAL))
         })
     }
+
     pub fn read_payload(&self, tid: u32) -> io::Result<Vec<u8>> {
         let size = self.capacity()?;
         if size > 65507 {
@@ -85,6 +88,7 @@ impl Message {
         }
         Ok(data)
     }
+
     pub fn write_payload(&self, tid: u32, bytes: &[u8]) -> io::Result<()> {
         let mut remaining = bytes;
         for &(pointer, length) in &self.vectors {
@@ -97,6 +101,7 @@ impl Message {
         }
         Ok(())
     }
+
     pub fn finish(
         &self,
         tid: u32,

@@ -61,6 +61,7 @@ impl Broker {
             relays: Mutex::new(JoinSet::new()),
         }))
     }
+
     pub fn valid(&self, notification: &Notification) -> io::Result<()> {
         if seccomp::valid(self.listener.as_raw_fd(), notification.id)? {
             Ok(())
@@ -68,6 +69,7 @@ impl Broker {
             Err(memory::error(libc::EINTR))
         }
     }
+
     fn respond(&self, notification: &Notification, result: io::Result<Reply>) -> io::Result<()> {
         let (value, errno, passthrough) = match result {
             Ok(Reply::Sent) => return Ok(()),
@@ -89,6 +91,7 @@ impl Broker {
             result => result,
         }
     }
+
     pub async fn run(
         self: Arc<Self>,
         mut notifications: mpsc::Receiver<io::Result<Notification>>,
@@ -164,6 +167,7 @@ impl Broker {
         result?;
         drain_relays(relays, &mut shutdown, &mut ingress).await
     }
+
     async fn dispatch(self: &Arc<Self>, notification: &Notification) -> io::Result<Reply> {
         self.valid(notification)?;
         let call = notification.data.nr as libc::c_long;
@@ -231,6 +235,7 @@ impl Broker {
         }
     }
 }
+
 async fn drain_relays(
     mut relays: JoinSet<()>,
     shutdown: &mut watch::Receiver<Shutdown>,

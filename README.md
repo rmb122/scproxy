@@ -34,12 +34,12 @@ proxy authentication/handshake.
 
 Routing rules use `MATCH=ROUTE`:
 
-| Match | Example | Priority |
-| --- | --- | --- |
-| IP | `ip:1.1.1.1=direct` | Longest prefix; first rule wins ties |
-| CIDR | `cidr:10.0.0.0/8=direct` | Longest prefix; first rule wins ties |
-| Domain | `domain:example.com=http://127.0.0.1:8080` | First matching domain rule; case insensitive |
-| Regex | `domain-regex:.*\.example\.com=socks5://127.0.0.1:1080` | First matching domain rule; regex flags control case sensitivity |
+| Match  | Example                                                 | Priority                                                         |
+| ------ | ------------------------------------------------------- | ---------------------------------------------------------------- |
+| IP     | `ip:1.1.1.1=direct`                                     | Longest prefix; first rule wins ties                             |
+| CIDR   | `cidr:10.0.0.0/8=direct`                                | Longest prefix; first rule wins ties                             |
+| Domain | `domain:example.com=http://127.0.0.1:8080`              | First matching domain rule; case insensitive                     |
+| Regex  | `domain-regex:.*\.example\.com=socks5://127.0.0.1:1080` | First matching domain rule; regex flags control case sensitivity |
 
 Domain rules apply to names recovered when connecting to FakeIPs, falling back
 to `-x`. The selected route resolves the domain when establishing its upstream

@@ -39,6 +39,7 @@ fn filtered(mode: &str, command: Command) -> Command {
         .args(command.get_args());
     result
 }
+
 #[test]
 #[ignore = "requires Linux seccomp, pidfd_getfd, and Python 3"]
 fn missing_or_denied_capabilities_fail_before_command_exec() {
@@ -56,6 +57,7 @@ fn missing_or_denied_capabilities_fail_before_command_exec() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
 #[test]
 #[ignore = "requires Linux seccomp, pidfd_getfd, kcmp, and Python 3"]
 fn legacy_pidfd_access_handles_worker_threads() {

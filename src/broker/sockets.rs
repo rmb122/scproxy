@@ -76,6 +76,7 @@ pub(super) fn peer_address(fd: RawFd, socket_option: bool) -> io::Result<SocketA
 pub(super) fn cookie(fd: RawFd) -> io::Result<u64> {
     option(fd, libc::SOL_SOCKET, libc::SO_COOKIE)
 }
+
 pub(super) fn is_tcp_v4(fd: RawFd) -> io::Result<bool> {
     Ok(
         option_int(fd, libc::SOL_SOCKET, libc::SO_DOMAIN)? == libc::AF_INET
@@ -134,6 +135,7 @@ pub(super) fn connect(fd: RawFd, addr: SocketAddrV4) -> io::Result<()> {
         )
     })
 }
+
 pub(super) fn queue_len(fd: RawFd, request: libc::c_ulong) -> io::Result<usize> {
     let mut value: libc::c_int = 0;
     check(unsafe { libc::ioctl(fd, request as _, &mut value) })?;
