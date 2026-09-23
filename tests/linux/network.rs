@@ -174,10 +174,14 @@ fn explicit_local_proxy_rules_preserve_destinations_but_do_not_override_dns() {
         let script = format!(
             "{DNS_API}\n{SOCKET_API}\n{}",
             r#"
-for ip in ['0.0.0.0','127.0.0.1','198.18.200.1']:
+for ip in ['198.18.0.1','0.0.0.0','127.0.0.1','198.18.200.1']:
     for tcp in [False,True]:
         answer=dns_lookup('dns.invalid',tcp,server=(ip,53))
-        assert answer[0][0].startswith(('198.18.','198.19.')),answer
+        assert answer[0][0]=='198.18.0.2',answer
+with socket.socket() as reserved:
+    reserved.settimeout(1)
+    try: reserved.connect(('198.18.0.1',8443)); raise AssertionError('DNS address was routed')
+    except OSError as error: assert error.errno==errno.ENETUNREACH,error
 for ip in ['127.0.0.1','127.42.1.2','0.0.0.0']:
     with socket.create_connection((ip,8443),timeout=3) as connection:
         assert connection.getpeername()==peer_name(connection)==(ip,8443)
@@ -191,6 +195,8 @@ for ip in ['127.0.0.1','127.42.1.2','0.0.0.0']:
                 &format!("cidr:127.0.0.0/8={route}"),
                 "-r",
                 &format!("ip:0.0.0.0={route}"),
+                "-r",
+                &format!("ip:198.18.0.1={route}"),
                 "python3",
                 "-c",
                 &script,
@@ -233,10 +239,11 @@ for destination in [('127.0.0.1',int(os.environ['UDP_PORT'])),('8.8.8.8',123)]:
 s=socket.socket()
 try: s.sendto(b'no leak',socket.MSG_FASTOPEN,('127.0.0.1',int(os.environ['TCP_PORT']))); raise AssertionError('Fast Open allowed')
 except OSError as e: assert e.errno==errno.EOPNOTSUPP,e
-with socket.socket() as unknown:
-    unknown.settimeout(1)
-    try: unknown.connect(('198.18.200.1',443)); raise AssertionError('unknown FakeIP allowed')
-    except OSError as e: assert e.errno==errno.ENETUNREACH,e
+for ip in ['198.18.0.1','198.18.200.1']:
+    with socket.socket() as unknown:
+        unknown.settimeout(1)
+        try: unknown.connect((ip,443)); raise AssertionError('reserved or unknown FakeIP allowed')
+        except OSError as e: assert e.errno==errno.ENETUNREACH,e
 "#]).output().unwrap();
     assert!(
         output.status.success(),

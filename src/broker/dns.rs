@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn targets_recover_domains_and_reject_unknown_fake_addresses() {
         let resolver = Resolver::default();
-        let fake = "198.18.0.1:443".parse().unwrap();
+        let fake = "198.18.0.2:443".parse().unwrap();
         assert_eq!(
             resolver.target(fake).unwrap_err().raw_os_error(),
             Some(libc::ENETUNREACH)
@@ -192,9 +192,16 @@ mod tests {
         ));
         let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07missing\x07invalid\x00\x00\x01\x00\x01";
         let answer = resolver.answer(query).unwrap();
-        assert_eq!(&answer[answer.len() - 4..], &[198, 18, 0, 1]);
+        assert_eq!(&answer[answer.len() - 4..], &[198, 18, 0, 2]);
         assert!(
             matches!(resolver.target(fake).unwrap(), ProxyTarget::Domain {host, port:443} if host == "missing.invalid")
+        );
+        assert_eq!(
+            resolver
+                .target(SocketAddrV4::new(DNS_ADDR, 443))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ENETUNREACH)
         );
     }
 }

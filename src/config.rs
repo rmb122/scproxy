@@ -30,7 +30,8 @@ impl Config {
 /// The resolver address is virtual; seccomp redirects it to the broker.
 pub mod net {
     use std::net::Ipv4Addr;
-    pub const DNS_ADDR: Ipv4Addr = Ipv4Addr::new(172, 23, 255, 254);
+    /// Reserved for DNS; domain FakeIPs are allocated after this address.
+    pub const DNS_ADDR: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
     pub const DNS_PORT: u16 = 53;
 }
 

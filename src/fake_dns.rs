@@ -10,15 +10,17 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+use crate::config::net::DNS_ADDR;
+
 // ── Pool constants ────────────────────────────────────────────────────────────
 
-/// First usable address in the pool (198.18.0.1).
-const POOL_START: u32 = u32::from_be_bytes([198, 18, 0, 1]);
+/// First domain address (198.18.0.2), after the reserved DNS address.
+const POOL_START: u32 = u32::from_be_bytes(DNS_ADDR.octets()) + 1;
 
 /// Last usable address in the pool (198.19.255.254).
 const POOL_END: u32 = u32::from_be_bytes([198, 19, 255, 254]);
 
-/// Total number of usable addresses (131 070).
+/// Total number of domain addresses (131 069).
 const POOL_SIZE: u32 = POOL_END - POOL_START + 1;
 
 // ── FakeDns ───────────────────────────────────────────────────────────────────
@@ -72,10 +74,11 @@ impl FakeDns {
         self.ip_to_domain.get(&ip).map(String::as_str)
     }
 
-    /// Return `true` iff `ip` falls within the fake-IP pool range.
+    /// Recognize domain FakeIPs and the reserved DNS address. The latter has
+    /// no domain mapping, so non-DNS connections fail instead of routing it.
     pub fn is_fake_ip(&self, ip: Ipv4Addr) -> bool {
         let n = u32::from(ip);
-        (POOL_START..=POOL_END).contains(&n)
+        ip == DNS_ADDR || (POOL_START..=POOL_END).contains(&n)
     }
 }
 
@@ -217,13 +220,16 @@ mod tests {
         let mut dns = FakeDns::new();
         let first = dns.resolve("first.test");
         let second = dns.resolve("second.test");
+        assert_eq!(first, Ipv4Addr::new(198, 18, 0, 2));
         assert_eq!(dns.resolve("first.test"), first);
         assert_ne!(first, second);
         assert_eq!(dns.lookup(first), Some("first.test"));
         assert_eq!(dns.lookup(second), Some("second.test"));
         assert_eq!(dns.lookup(Ipv4Addr::new(1, 2, 3, 4)), None);
+        assert_eq!(dns.lookup(DNS_ADDR), None);
         for (address, expected) in [
-            (POOL_START - 1, false),
+            (POOL_START - 2, false),
+            (POOL_START - 1, true),
             (POOL_START, true),
             (POOL_END, true),
             (POOL_END + 1, false),
@@ -237,11 +243,12 @@ mod tests {
         let mut dns = FakeDns::new();
         let first = dns.resolve("first.test");
         for i in 1..POOL_SIZE {
-            dns.resolve(&format!("{i}.test"));
+            assert_ne!(dns.resolve(&format!("{i}.test")), DNS_ADDR);
         }
         assert_eq!(dns.resolve("new.test"), first);
         assert_eq!(dns.lookup(first), Some("new.test"));
         assert_ne!(dns.resolve("first.test"), first);
+        assert_eq!(dns.lookup(DNS_ADDR), None);
     }
 
     fn query(qtype: u16) -> Vec<u8> {

@@ -88,7 +88,7 @@ fn proxy_and_dns_work_with_all_namespace_creation_disabled() {
 import json,os,socket
 for name,value in json.loads(os.environ['SCPROXY_ORIGINAL_NS']).items():assert os.readlink('/proc/self/ns/'+name)==value
 assert [os.getuid(),os.getgid()]==json.loads(os.environ['SCPROXY_ORIGINAL_IDS'])
-assert open('/etc/resolv.conf').read()=='nameserver 172.23.255.254\n'
+assert open('/etc/resolv.conf').read()=='nameserver 198.18.0.1\n'
 assert socket.gethostbyname('without-namespaces.invalid').startswith(('198.18.','198.19.'))
 print('no namespaces OK')
 "#]);

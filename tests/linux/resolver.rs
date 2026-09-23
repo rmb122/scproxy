@@ -12,7 +12,7 @@ fn resolver_files_are_virtual_read_only_and_have_independent_open_offsets() {
             "-c",
             r#"
 import ctypes as c, errno, fcntl, mmap, os, platform, stat
-expected=b'nameserver 172.23.255.254\n'
+expected=b'nameserver 198.18.0.1\n'
 lib=c.CDLL(None,use_errno=True); lib.syscall.restype=c.c_long
 openat=257 if platform.machine()=='x86_64' else 56
 def opened(path, flags=os.O_RDONLY, directory=-100):
@@ -82,13 +82,14 @@ print('virtual resolver OK')
 fn dns_server_addresses_and_udp_tcp_queries_are_intercepted() {
     let output = scproxy("http://127.0.0.1:1").args(["python3", "-c", &format!("{SOCKET_API}\n{}", r#"
 import socket,struct
-servers=[('203.0.113.53',53),('127.0.0.53',53)]
+servers=[('198.18.0.1',53),('203.0.113.53',53),('127.0.0.53',53)]
 def query(name):
     return b'\x12\x34\x01\x00\x00\x01'+b'\x00'*6+b''.join(bytes([len(label)])+label.encode() for label in name.split('.'))+b'\0\0\1\0\1'
 def check(answer,request):
     assert answer[:2]==request[:2] and answer[7]==1
     assert answer[12:len(request)]==request[12:]
     assert answer[-4]==198 and answer[-3] in (18,19)
+    assert socket.inet_ntoa(answer[-4:])!='198.18.0.1'
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(3)
 requests={server:query('server%d.invalid'%i) for i,server in enumerate(servers)}
 # Identical transaction IDs on a single unconnected socket must not confuse sources.

@@ -33,7 +33,7 @@ int main(void) {
     alarm(10);
     resolver.sin_family = AF_INET;
     resolver.sin_port = htons(53);
-    assert(inet_pton(AF_INET, "172.23.255.254", &resolver.sin_addr) == 1);
+    assert(inet_pton(AF_INET, "198.18.0.1", &resolver.sin_addr) == 1);
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     assert(fd >= 0);
     int duplicate = dup(fd), ep = epoll_create1(EPOLL_CLOEXEC);
